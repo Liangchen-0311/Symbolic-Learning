@@ -1,0 +1,70 @@
+dataset: imagenet
+device: cuda
+
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  train_subset: null
+  test_subset: null
+  resolution_quick: 112
+  resolution_full: 224
+  samples_per_class_quick: 20
+  samples_per_class_full: 20
+  num_classes: 1000
+
+model:
+  max_depth: 7
+  max_sequence_length: 18
+  embedding_dim: 192
+  hidden_size: 384
+  num_layers: 2
+  dropout: 0.1
+
+training:
+  batch_size: 128
+  eval_batch_size: 128
+  iterations: 500
+  episodes_per_iteration: 50
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  length_penalty: 0.02
+  diversity_penalty: 0.3
+  entropy_coef_start: 0.05
+  entropy_coef_end: 0.005
+  entropy_decay_fraction: 0.5
+  lr_warmup_iterations: 30
+
+strategy:
+  feature_bank_size: 5000
+  min_accuracy_threshold: 0.08
+  correlation_threshold: 0.85
+  correlation_threshold_full: 0.95
+  adaptive_threshold: true
+  threshold_warmup_fraction: 0.5
+  reward_type: loss_based
+  use_hierarchical_eval: true
+  hierarchical_switch_fraction: 0.5
+  diversity_penalty: 0.3
+  l1_lambda: 0.0
+  lasso_epochs: 100
+
+# v3: 4-bank multi-bank training
+multi_bank:
+  enabled: true
+  num_banks: 4
+  bank_configs:
+    - {max_depth: 4, max_sequence_length: 8, focus: "short"}
+    - {max_depth: 8, max_sequence_length: 20, binary_op_bias: 0.5, focus: "cross-channel"}
+    - {max_depth: 6, max_sequence_length: 15, focus: "texture"}
+    - {max_depth: 7, max_sequence_length: 18, focus: "multiscale"}
+
+exclude_operators: []
+checkpoint_interval: 100
+output_dir: outputs/imagenet_v3

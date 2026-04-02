@@ -1,0 +1,67 @@
+dataset: imagenet
+device: cuda
+
+# Layer 2: L1 feature maps as additional terminals
+l1_bodies_path: outputs/imagenet_v3/layer2/l1_selected_bodies.json
+
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  resolution_quick: 112
+  resolution_full: 224
+  samples_per_class_quick: 20
+  samples_per_class_full: 20
+  num_classes: 1000
+
+model:
+  max_depth: 5
+  max_sequence_length: 12
+  embedding_dim: 192
+  hidden_size: 384
+  num_layers: 2
+  dropout: 0.1
+
+training:
+  batch_size: 128
+  eval_batch_size: 128
+  iterations: 500
+  episodes_per_iteration: 50
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  length_penalty: 0.02
+  diversity_penalty: 0.3
+  entropy_coef_start: 0.05
+  entropy_coef_end: 0.005
+  entropy_decay_fraction: 0.5
+  lr_warmup_iterations: 30
+
+strategy:
+  feature_bank_size: 3000
+  min_accuracy_threshold: 0.08
+  correlation_threshold: 0.85
+  adaptive_threshold: true
+  threshold_warmup_fraction: 0.5
+  reward_type: loss_based
+  use_hierarchical_eval: true
+  hierarchical_switch_fraction: 0.5
+  diversity_penalty: 0.3
+
+multi_bank:
+  enabled: true
+  num_banks: 4
+  bank_configs:
+    - {max_depth: 4, max_sequence_length: 8, focus: "short"}
+    - {max_depth: 6, max_sequence_length: 14, binary_op_bias: 0.5, focus: "cross-layer"}
+    - {max_depth: 5, max_sequence_length: 12, focus: "texture"}
+    - {max_depth: 5, max_sequence_length: 12, focus: "interaction"}
+
+exclude_operators: []
+checkpoint_interval: 100
+output_dir: outputs/imagenet_v3/layer2

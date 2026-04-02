@@ -1,0 +1,50 @@
+# ==============================================================
+# Neurosymbolic RL — CIFAR-100 on NVIDIA A100
+# Scheme A: Survival of the Fittest (1000-formula Feature Bank)
+# ==============================================================
+
+dataset: "cifar100"
+device: "cuda"
+
+# ---- Feature Bank Strategy (Scheme A) -----------------------
+strategy:
+  feature_bank_size: 1200         # bank capacity
+  lasso_target_features: 1200     # keep ALL features (no LASSO pruning)
+  l1_lambda: 0.0                  # no L1 in RL phase — pure weak features
+  l2_lambda: 0.0                  # no L2 either
+  lasso_epochs: 100
+  min_accuracy_threshold: 0.018   # CIFAR-100 random = 1%, so 1.8% is the floor
+  correlation_threshold: 0.75     # Pearson diversity gate (tighter = slower fill, more diverse)
+  diversity_penalty: 0.25         # reward penalty for high correlation
+
+# ---- Model (Policy Agent — LSTM) ----------------------------
+model:
+  max_depth: 5
+  max_sequence_length: 12
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+# ---- RL Training (PPO) --------------------------------------
+training:
+  iterations: 5000                # A100 can handle this comfortably
+  n_iterations: 5000              # alias for backward compat
+  episodes_per_iteration: 20
+  batch_size: 2048                # A100 80 GB VRAM — big batch for stable reward
+  eval_batch_size: 2048
+  num_classes: 100                # CIFAR-100
+
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+  length_penalty: 0.005
+
+# ---- Output --------------------------------------------------
+output_dir: "outputs/cifar100"

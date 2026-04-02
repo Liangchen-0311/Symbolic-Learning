@@ -1,0 +1,48 @@
+model:
+  max_depth: 5  # Maximum formula depth
+  max_sequence_length: 20
+  embedding_dim: 256
+  hidden_size: 512
+  num_layers: 3
+  dropout: 0.3
+
+training:
+  batch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.08
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+  n_iterations: 2000  # More iterations for harder task
+  episodes_per_iteration: 32
+
+  # Feature Bank
+  feature_bank_size: 20
+  min_accuracy: 0.15  # CIFAR-10
+  min_diversity: 0.3
+
+  # LASSO
+  l1_lambda: 0.01
+  lasso_epochs: 50
+
+  # Reward shaping
+  length_penalty: 0.01
+  inactive_feature_penalty: 0.05
+
+  # Device
+  device: "cuda"
+  num_gpus: 4  # Use 4 GPUs
+
+# Dataset-specific overrides
+cifar10:
+  min_accuracy: 0.15
+  num_classes: 10
+
+cifar100:
+  min_accuracy: 0.05  # Lower threshold for harder task
+  num_classes: 100
+  feature_bank_size: 30  # More features needed

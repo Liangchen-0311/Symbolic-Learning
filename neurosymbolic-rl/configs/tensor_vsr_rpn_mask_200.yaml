@@ -1,0 +1,69 @@
+model:
+  max_depth: 3  # 简单公式即可（depth 2-3）
+  max_sequence_length: 15
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+training:
+  # 批大小
+  batch_size: 32
+
+  # 大量迭代以填满200个公式
+  n_iterations: 1000  # 从100提升到1000
+  episodes_per_iteration: 20  # 足够的探索
+
+  # RL 超参数
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.06  # 提高探索率（0.05-0.08范围），利用RPN掩码保证合法性
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+
+  # 大型特征库（核心改进）
+  feature_bank_size: 200  # 从10/20提升到200
+  lasso_target_features: 80  # LASSO目标保留80个
+  min_accuracy: 0.10  # 低阈值（10% = random baseline）
+  min_diversity: 0.15  # 较低的多样性要求（LASSO会处理冗余）
+
+  # 调整LASSO参数以适应更多特征
+  l1_lambda: 0.001  # 降低正则化强度（从0.01降到0.001），防止过度裁剪
+  lasso_epochs: 200  # 充分训练
+  lasso_prune_interval: 50  # 每50个episode运行一次LASSO
+
+  # 奖励塑形
+  length_penalty: 0.01  # 最小惩罚（简单公式即可）
+  inactive_penalty: 0.05
+  diversity_penalty: 0.3  # 惩罚相关特征
+
+  # 设备
+  device: "mps"  # Apple Metal Performance Shaders
+
+dataset:
+  name: "cifar10"
+  num_classes: 10
+  # 使用全部数据集
+  train_subset: null  # 使用全部50K样本
+  test_subset: null   # 使用全部10K样本
+
+operators:
+  # 启用空间池化算子
+  spatial_pooling: true
+
+# 预期结果：
+# - 生成: 200个公式（低阈值接受）
+# - LASSO选择: 60-100个正交特征
+# - 目标准确率: 50-55%（从当前20%提升）
+# - 训练时间: 3-4小时（M1 64GB）
+#
+# 关键改进：
+# 1. RPN语法掩码确保100%合法公式
+# 2. 空间池化算子捕获位置信息
+# 3. 大容量特征库（200）
+# 4. 调整的LASSO参数（l1_lambda=0.001）
+# 5. 提高探索率（entropy=0.06）

@@ -1,0 +1,116 @@
+dataset: imagenet
+device: cuda
+
+# v3.2: new operators, distribution encoding, Fisher Vector, kernel map
+kernel_bank_path: outputs/imagenet_v3_2/kernel_bank_pretrained.pt
+
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  resolution_quick: 112
+  resolution_full: 224
+  samples_per_class_quick: 20
+  samples_per_class_full: 20
+  num_classes: 1000
+
+model:
+  max_depth: 7
+  max_sequence_length: 18
+  embedding_dim: 192
+  hidden_size: 384
+  num_layers: 2
+  dropout: 0.1
+
+training:
+  batch_size: 128
+  eval_batch_size: 128
+  iterations: 500
+  episodes_per_iteration: 50
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  length_penalty: 0.02
+  diversity_penalty: 0.3
+  entropy_coef_start: 0.05
+  entropy_coef_end: 0.005
+  entropy_decay_fraction: 0.5
+  lr_warmup_iterations: 30
+
+strategy:
+  feature_bank_size: 5000
+  min_accuracy_threshold: 0.002       # v3.2: relaxed from 0.004
+  correlation_threshold: 0.92
+  adaptive_threshold: true
+  threshold_warmup_fraction: 0.5
+  reward_type: loss_based
+  use_hierarchical_eval: true
+  hierarchical_switch_fraction: 0.5
+  diversity_penalty: 0.3
+
+multi_bank:
+  enabled: true
+  num_banks: 4
+  bank_configs:
+    - {max_depth: 4, max_sequence_length: 8, focus: "short"}
+    - {max_depth: 8, max_sequence_length: 20, binary_op_bias: 0.5, focus: "cross-channel"}
+    - {max_depth: 6, max_sequence_length: 15, focus: "texture"}
+    - {max_depth: 7, max_sequence_length: 18, focus: "multiscale"}
+
+# Layer 2 config
+layer2:
+  enabled: true
+  max_depth: 5
+  max_sequence_length: 12
+  n_l1_bases: 100             # top-100 complementary L1 bodies
+  forward_select_candidates: 500
+  forward_select_sgd_steps: 5
+  early_stop_gain: 0.001      # stop if best gain < 0.1%
+
+# Phase 3: feature encoding
+phase3:
+  # Distribution statistics encoding
+  distribution_stats:
+    n_stats: 12               # mean, std, max, skew, kurt, 5 quantiles, ratio
+    n_regions: 5              # 1x1 global + 2x2 quadrants
+    features_per_body: 60     # 12 * 5
+
+  # Fisher Vector
+  fisher_vector:
+    n_patches: 64             # 8x8 grid
+    pca_dim: 32
+    gmm_k: 64
+    fv_dim: 4096              # 2 * pca_dim * gmm_k
+
+  # Homogeneous kernel map
+  kernel_map:
+    order: 1                  # each feature -> 3 values
+    top_k_features: 20000     # apply only to top-K features
+
+  # Feature selection
+  l1_select_target: 50000
+  interaction_top_k: 500
+
+# Classifier
+classifier:
+  weight_decay_sweep: [10, 20, 50, 100]
+  epochs: 30
+  train_samples_per_class: 500
+
+# Fine-tuning
+finetune:
+  epochs: 10
+  classifier_lr: 0.001
+  classifier_wd: 10
+  classic_kernel_lr: 0.00001
+  learned_kernel_lr: 0.0001
+  train_samples_per_class: 500
+
+exclude_operators: []
+checkpoint_interval: 100
+output_dir: outputs/imagenet_v3_2

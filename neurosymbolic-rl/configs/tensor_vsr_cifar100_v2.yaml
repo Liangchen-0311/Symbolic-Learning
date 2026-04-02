@@ -1,0 +1,62 @@
+# ==============================================================
+# Neurosymbolic RL — CIFAR-100 v2: 1D Pooling + Augmentation
+# No SPP (avoid 21x dimensionality inflation)
+# Keep: I_GRAY, binary ops, depth 5
+# Target: 60%+ accuracy
+# ==============================================================
+
+dataset: "cifar100"
+device: "cuda"
+
+# ---- Operator filtering ----------------------------------------
+exclude_operators:
+  - spp_pool            # Remove SPP to keep 1D output per formula
+
+# ---- Data augmentation -----------------------------------------
+augment: true             # RandomCrop(32,pad=4) + HorizontalFlip
+
+# ---- Feature Bank Strategy (Scheme A) -----------------------
+strategy:
+  feature_bank_size: 5000           # 5000 formulas x 1D = 5000 dims (healthy ratio)
+  lasso_target_features: 5000
+  l1_lambda: 0.0
+  l2_lambda: 0.0
+  lasso_epochs: 100
+  min_accuracy_threshold: 0.02      # above random (1%) for CIFAR-100
+  correlation_threshold: 0.70       # diverse features for 100 classes
+  diversity_penalty: 0.25
+
+# ---- Model (Policy Agent — LSTM) ----------------------------
+model:
+  max_depth: 5                      # deeper formulas
+  max_sequence_length: 14           # longer sequences for depth 5
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+# ---- RL Training (PPO) --------------------------------------
+training:
+  iterations: 5000
+  n_iterations: 5000
+  episodes_per_iteration: 20
+  batch_size: 2048
+  eval_batch_size: 2048
+  num_classes: 100
+
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.08                # higher entropy for exploration
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+  length_penalty: 0.005
+
+  # Cross-channel fusion bias
+  binary_op_bias: 1.0               # logit boost for subtract & multiply
+
+# ---- Output --------------------------------------------------
+output_dir: "outputs/cifar100_v2"

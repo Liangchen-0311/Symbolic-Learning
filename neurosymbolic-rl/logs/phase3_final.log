@@ -1,0 +1,123 @@
+[FeatureBank] Loaded 2611 formulas from outputs/imagenet_single_bank/phase2/feature_bank
+Loaded 2611 validated formulas from Phase 2
+
+Loading ImageNet...
+[ImageNet] Train: 200000 images
+[ImageNet] Val: 50000 images
+[ImageNet] Resolution: 224x224
+  Train subset: 200000 images (200/class)
+  Val: 50000 images
+
+Extracting train features (2611 formulas)...
+  [train] batch 1/391  (512/200000 images, 0.3%)
+  [train] batch 20/391  (10240/200000 images, 5.1%)
+  [train] batch 40/391  (20480/200000 images, 10.2%)
+  [train] batch 60/391  (30720/200000 images, 15.4%)
+  [train] batch 80/391  (40960/200000 images, 20.5%)
+  [train] batch 100/391  (51200/200000 images, 25.6%)
+  [train] batch 120/391  (61440/200000 images, 30.7%)
+  [train] batch 140/391  (71680/200000 images, 35.8%)
+  [train] batch 160/391  (81920/200000 images, 41.0%)
+  [train] batch 180/391  (92160/200000 images, 46.1%)
+  [train] batch 200/391  (102400/200000 images, 51.2%)
+  [train] batch 220/391  (112640/200000 images, 56.3%)
+  [train] batch 240/391  (122880/200000 images, 61.4%)
+  [train] batch 260/391  (133120/200000 images, 66.6%)
+  [train] batch 280/391  (143360/200000 images, 71.7%)
+  [train] batch 300/391  (153600/200000 images, 76.8%)
+  [train] batch 320/391  (163840/200000 images, 81.9%)
+  [train] batch 340/391  (174080/200000 images, 87.0%)
+  [train] batch 360/391  (184320/200000 images, 92.2%)
+  [train] batch 380/391  (194560/200000 images, 97.3%)
+  Done: (200000, 2611) in 49.9 min
+
+Extracting val features...
+  [val] batch 1/98  (512/50000 images, 1.0%)
+  [val] batch 20/98  (10240/50000 images, 20.5%)
+  [val] batch 40/98  (20480/50000 images, 41.0%)
+  [val] batch 60/98  (30720/50000 images, 61.4%)
+  [val] batch 80/98  (40960/50000 images, 81.9%)
+  Done: (50000, 2611) in 12.6 min
+
+Computing feature statistics...
+
+============================================================
+  PyTorch nn.Linear — weight_decay sweep
+============================================================
+
+  weight_decay=0.0001 ...
+      epoch 5/20  loss=5.4005
+      epoch 10/20  loss=5.1489
+      epoch 15/20  loss=5.0627
+      epoch 20/20  loss=5.0409
+    Train=13.26%  Val-Top1=9.22%  Val-Top5=21.64%  (20.1s)
+
+  weight_decay=0.001 ...
+      epoch 5/20  loss=5.4010
+      epoch 10/20  loss=5.1492
+      epoch 15/20  loss=5.0630
+      epoch 20/20  loss=5.0408
+    Train=13.28%  Val-Top1=9.24%  Val-Top5=21.70%  (20.0s)
+
+  weight_decay=0.01 ...
+      epoch 5/20  loss=5.4030
+      epoch 10/20  loss=5.1519
+      epoch 15/20  loss=5.0670
+      epoch 20/20  loss=5.0446
+    Train=13.25%  Val-Top1=9.14%  Val-Top5=21.59%  (20.0s)
+
+  weight_decay=0.1 ...
+      epoch 5/20  loss=5.4230
+      epoch 10/20  loss=5.1855
+      epoch 15/20  loss=5.1056
+      epoch 20/20  loss=5.0852
+    Train=13.04%  Val-Top1=9.09%  Val-Top5=21.52%  (19.7s)
+
+============================================================
+  Per-Superclass Accuracy (best wd=0.001)
+============================================================
+    vehicle_water_air           6.84%
+    structure_building          7.20%
+    vehicle_land                7.60%
+    bird                        8.28%
+    insect_arthropod            8.48%
+    furniture_indoor            8.60%
+    clothing_fabric             8.64%
+    reptile_amphibian           9.08%
+    plant_flower                9.20%
+    container_vessel            9.32%
+    food_other                  9.52%
+    tool_implement              9.60%
+    natural_scene_misc          9.68%
+    food_fruit                  9.76%
+    mammal_pet                  9.84%
+    musical_instrument         10.08%
+    electronic_device          10.12%
+    primate                    10.28%
+    mammal_wild                10.72%
+    fish_aquatic               11.96%
+
+============================================================
+  Baselines
+============================================================
+    Computing random feature baseline...
+    Computing PCA baseline...
+    Computing pixel-mean baseline...
+    random_features                     Top1=  0.10%  Top5=  0.51%
+    pca_100_components                  Top1=  8.68%  Top5= 20.67%
+    pixel_channel_means_only            Top1=  0.13%  Top5=  0.63%
+
+============================================================
+  FINAL RESULTS (2611 symbolic features)
+============================================================
+  Config             Train   Val-T1   Val-T5
+  -------------------------------------------
+  wd=0.0001         13.26%    9.22%   21.64%
+  wd=0.001          13.28%    9.24%   21.70%
+  wd=0.01           13.25%    9.14%   21.59%
+  wd=0.1            13.04%    9.09%   21.52%
+  -------------------------------------------
+  BEST: wd=0.001  Top-1=9.24%  Top-5=21.70%
+============================================================
+
+Results saved to outputs/imagenet_single_bank/phase3/final_results.json

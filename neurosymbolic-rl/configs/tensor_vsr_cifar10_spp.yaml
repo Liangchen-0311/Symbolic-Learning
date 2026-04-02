@@ -1,0 +1,60 @@
+# ==============================================================
+# Neurosymbolic RL — CIFAR-10 SPP + Cross-Channel Upgrade
+# Scheme A: Survival of the Fittest (1500-formula Feature Bank)
+# Target: 80%+ accuracy with SPP + MLP evaluator
+# ==============================================================
+
+dataset: "cifar10"
+device: "cuda"
+
+# ---- Feature Bank Strategy (Scheme A) -----------------------
+strategy:
+  feature_bank_size: 3000           # large bank for orthogonal feature coverage
+  lasso_target_features: 3000       # keep ALL features (LASSO disabled)
+  l1_lambda: 0.0                    # no L1 — pure orthogonal features via correlation gate
+  l2_lambda: 0.0
+  lasso_epochs: 100
+  min_accuracy_threshold: 0.15      # above random (10%) for CIFAR-10
+  correlation_threshold: 0.78       # tighter diversity with larger bank
+  diversity_penalty: 0.25           # reward penalty for correlated features
+
+# ---- Model (Policy Agent — LSTM) ----------------------------
+model:
+  max_depth: 4                      # deeper formulas for richer features
+  max_sequence_length: 10           # longer sequences to exploit depth 4
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+# ---- RL Training (PPO) --------------------------------------
+training:
+  iterations: 5000
+  n_iterations: 5000
+  episodes_per_iteration: 20
+  batch_size: 2048                  # A100 80GB — big batch for stable rewards
+  eval_batch_size: 2048             # large eval batch for accurate rewards
+  num_classes: 10
+
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.08                # higher entropy for more exploration
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+  length_penalty: 0.005
+
+  # Cross-channel fusion bias
+  binary_op_bias: 1.0               # logit boost for subtract & multiply
+
+# ---- Dataset Options -----------------------------------------
+dataset_options:
+  train_subset: null                # use all 50K training images
+  test_subset: null                 # use all 10K test images
+  num_classes: 10
+
+# ---- Output --------------------------------------------------
+output_dir: "outputs/cifar10_spp"

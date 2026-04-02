@@ -1,0 +1,60 @@
+# ==============================================================
+# Neurosymbolic RL — CIFAR-10 v2: 1D Pooling + Augmentation
+# No SPP (avoid 21x dimensionality inflation)
+# Keep: I_GRAY, binary ops, depth 4
+# ==============================================================
+
+dataset: "cifar10"
+device: "cuda"
+
+# ---- Operator filtering ----------------------------------------
+exclude_operators:
+  - spp_pool
+
+# ---- Data augmentation -----------------------------------------
+augment: true
+
+# ---- Feature Bank Strategy (Scheme A) -----------------------
+strategy:
+  feature_bank_size: 5000
+  lasso_target_features: 5000
+  l1_lambda: 0.0
+  l2_lambda: 0.0
+  lasso_epochs: 100
+  min_accuracy_threshold: 0.15
+  correlation_threshold: 0.78
+  diversity_penalty: 0.25
+
+# ---- Model (Policy Agent — LSTM) ----------------------------
+model:
+  max_depth: 4
+  max_sequence_length: 10
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+# ---- RL Training (PPO) --------------------------------------
+training:
+  iterations: 5000
+  n_iterations: 5000
+  episodes_per_iteration: 20
+  batch_size: 2048
+  eval_batch_size: 2048
+  num_classes: 10
+
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.08
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+  length_penalty: 0.005
+
+  binary_op_bias: 1.0
+
+# ---- Output --------------------------------------------------
+output_dir: "outputs/cifar10_v2"

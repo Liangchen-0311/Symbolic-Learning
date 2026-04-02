@@ -1,0 +1,63 @@
+model:
+  max_depth: 3  # Keep formulas simple (depth 2-3 sufficient)
+  max_sequence_length: 7  # Reduced from 15 to prevent long formulas
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+training:
+  # Batch size
+  batch_size: 32  # Moderate batch for M1
+  eval_batch_size: 512  # Large batch for accurate reward computation
+
+  # Large Feature Bank Strategy: Generate many formulas
+  n_iterations: 1000  # More iterations to fill 200 formulas
+  episodes_per_iteration: 20  # More episodes per iteration
+
+  # RL hyperparameters
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05  # Encourage exploration
+  max_grad_norm: 1.0
+  n_epochs_ppo: 4
+  batch_size_ppo: 64
+
+  # LARGE FEATURE BANK (Core of Strategy)
+  feature_bank_size: 200  # Increased from 10/20 → 200
+  lasso_target_features: 80  # Target to keep 80/200 after LASSO
+  min_accuracy: 0.10  # Low threshold (10% = random baseline)
+  min_diversity: 0.15  # Lower diversity requirement (LASSO handles redundancy)
+
+  # STRONG LASSO (Core of Strategy)
+  l1_lambda: 0.5  # Strong L1 regularization (from 0.01 → 0.5)
+  lasso_epochs: 200  # Sufficient training for strong convergence
+  lasso_prune_interval: 50  # Run LASSO every 50 episodes when bank is full
+
+  # Reward shaping
+  length_penalty: 0.01  # Minimal penalty (encourage simple formulas)
+  inactive_penalty: 0.05
+  diversity_penalty: 0.3  # Penalize correlated features
+
+  # Device
+  device: "mps"  # Use Apple Metal Performance Shaders
+
+dataset:
+  name: "cifar10"
+  num_classes: 10
+  # Use FULL dataset for better accuracy
+  train_subset: null  # Use all 50K samples
+  test_subset: null   # Use all 10K samples
+
+operators:
+  # Enable spatial pooling operators (NEW!)
+  spatial_pooling: true
+
+# Expected Results:
+# - Generate: 200 formulas (low threshold)
+# - LASSO selects: 60-100 orthogonal features
+# - Target accuracy: 45-55% (from current 20%)
+# - Training time: 3-4 hours on M1 64GB

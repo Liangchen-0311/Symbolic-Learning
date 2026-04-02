@@ -1,0 +1,11 @@
+# MLP Baseline Configuration
+
+model:
+  hidden_dims: [128, 64]  # Hidden layer dimensions
+  dropout: 0.2            # Dropout probability
+
+training:
+  epochs: 200             # Maximum epochs
+  learning_rate: 0.001    # Adam learning rate
+  batch_size: 64          # Batch size
+  patience: 20            # Early stopping patience

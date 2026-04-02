@@ -1,0 +1,154 @@
+Phase 2 bank: outputs/imagenet_single_bank/phase2/feature_bank
+Phase 3 output: outputs/imagenet_single_bank/phase3
+
+======================================================================
+  PHASE 3: FINAL CLASSIFICATION
+======================================================================
+[FeatureBank] Loaded 2611 formulas from outputs/imagenet_single_bank/phase2/feature_bank
+Loaded 2611 validated formulas
+
+Loading ImageNet at 224x224 (full dataset)...
+[ImageNet] Train: 1180660 images
+[ImageNet] Val: 50000 images
+[ImageNet] Resolution: 224x224
+  Train: 1180660 images
+  Val:   50000 images
+
+Extracting training features (2611 formulas)...
+  [train] batch 1/2306  (512/1180660 images)
+  [train] batch 20/2306  (10240/1180660 images)
+  [train] batch 40/2306  (20480/1180660 images)
+  [train] batch 60/2306  (30720/1180660 images)
+  [train] batch 80/2306  (40960/1180660 images)
+  [train] batch 100/2306  (51200/1180660 images)
+  [train] batch 120/2306  (61440/1180660 images)
+  [train] batch 140/2306  (71680/1180660 images)
+  [train] batch 160/2306  (81920/1180660 images)
+  [train] batch 180/2306  (92160/1180660 images)
+  [train] batch 200/2306  (102400/1180660 images)
+  [train] batch 220/2306  (112640/1180660 images)
+  [train] batch 240/2306  (122880/1180660 images)
+  [train] batch 260/2306  (133120/1180660 images)
+  [train] batch 280/2306  (143360/1180660 images)
+  [train] batch 300/2306  (153600/1180660 images)
+  [train] batch 320/2306  (163840/1180660 images)
+  [train] batch 340/2306  (174080/1180660 images)
+  [train] batch 360/2306  (184320/1180660 images)
+  [train] batch 380/2306  (194560/1180660 images)
+  [train] batch 400/2306  (204800/1180660 images)
+  [train] batch 420/2306  (215040/1180660 images)
+  [train] batch 440/2306  (225280/1180660 images)
+  [train] batch 460/2306  (235520/1180660 images)
+  [train] batch 480/2306  (245760/1180660 images)
+  [train] batch 500/2306  (256000/1180660 images)
+  [train] batch 520/2306  (266240/1180660 images)
+  [train] batch 540/2306  (276480/1180660 images)
+  [train] batch 560/2306  (286720/1180660 images)
+  [train] batch 580/2306  (296960/1180660 images)
+  [train] batch 600/2306  (307200/1180660 images)
+  [train] batch 620/2306  (317440/1180660 images)
+  [train] batch 640/2306  (327680/1180660 images)
+  [train] batch 660/2306  (337920/1180660 images)
+  [train] batch 680/2306  (348160/1180660 images)
+  [train] batch 700/2306  (358400/1180660 images)
+  [train] batch 720/2306  (368640/1180660 images)
+  [train] batch 740/2306  (378880/1180660 images)
+  [train] batch 760/2306  (389120/1180660 images)
+  [train] batch 780/2306  (399360/1180660 images)
+  [train] batch 800/2306  (409600/1180660 images)
+  [train] batch 820/2306  (419840/1180660 images)
+  [train] batch 840/2306  (430080/1180660 images)
+  [train] batch 860/2306  (440320/1180660 images)
+  [train] batch 880/2306  (450560/1180660 images)
+  [train] batch 900/2306  (460800/1180660 images)
+  [train] batch 920/2306  (471040/1180660 images)
+  [train] batch 940/2306  (481280/1180660 images)
+  [train] batch 960/2306  (491520/1180660 images)
+  [train] batch 980/2306  (501760/1180660 images)
+  [train] batch 1000/2306  (512000/1180660 images)
+  [train] batch 1020/2306  (522240/1180660 images)
+  [train] batch 1040/2306  (532480/1180660 images)
+  [train] batch 1060/2306  (542720/1180660 images)
+  [train] batch 1080/2306  (552960/1180660 images)
+  [train] batch 1100/2306  (563200/1180660 images)
+  [train] batch 1120/2306  (573440/1180660 images)
+  [train] batch 1140/2306  (583680/1180660 images)
+  [train] batch 1160/2306  (593920/1180660 images)
+  [train] batch 1180/2306  (604160/1180660 images)
+  [train] batch 1200/2306  (614400/1180660 images)
+  [train] batch 1220/2306  (624640/1180660 images)
+  [train] batch 1240/2306  (634880/1180660 images)
+  [train] batch 1260/2306  (645120/1180660 images)
+  [train] batch 1280/2306  (655360/1180660 images)
+  [train] batch 1300/2306  (665600/1180660 images)
+  [train] batch 1320/2306  (675840/1180660 images)
+  [train] batch 1340/2306  (686080/1180660 images)
+  [train] batch 1360/2306  (696320/1180660 images)
+  [train] batch 1380/2306  (706560/1180660 images)
+  [train] batch 1400/2306  (716800/1180660 images)
+  [train] batch 1420/2306  (727040/1180660 images)
+  [train] batch 1440/2306  (737280/1180660 images)
+  [train] batch 1460/2306  (747520/1180660 images)
+  [train] batch 1480/2306  (757760/1180660 images)
+  [train] batch 1500/2306  (768000/1180660 images)
+  [train] batch 1520/2306  (778240/1180660 images)
+  [train] batch 1540/2306  (788480/1180660 images)
+  [train] batch 1560/2306  (798720/1180660 images)
+  [train] batch 1580/2306  (808960/1180660 images)
+  [train] batch 1600/2306  (819200/1180660 images)
+  [train] batch 1620/2306  (829440/1180660 images)
+  [train] batch 1640/2306  (839680/1180660 images)
+  [train] batch 1660/2306  (849920/1180660 images)
+  [train] batch 1680/2306  (860160/1180660 images)
+  [train] batch 1700/2306  (870400/1180660 images)
+  [train] batch 1720/2306  (880640/1180660 images)
+  [train] batch 1740/2306  (890880/1180660 images)
+  [train] batch 1760/2306  (901120/1180660 images)
+  [train] batch 1780/2306  (911360/1180660 images)
+  [train] batch 1800/2306  (921600/1180660 images)
+  [train] batch 1820/2306  (931840/1180660 images)
+  [train] batch 1840/2306  (942080/1180660 images)
+  [train] batch 1860/2306  (952320/1180660 images)
+  [train] batch 1880/2306  (962560/1180660 images)
+Traceback (most recent call last):
+  File "/workspace/neurosymbolic-rl/experiments/run_phase3_only.py", line 30, in <module>
+    run_phase3(config, DEVICE, phase3_dir, phase2_dir)
+  File "/workspace/neurosymbolic-rl/experiments/train_imagenet_pipeline.py", line 567, in run_phase3
+    X_train_mmap, y_train = extract_features_mmap(
+                            ^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/neurosymbolic-rl/experiments/train_imagenet_pipeline.py", line 696, in extract_features_mmap
+    for batch_idx, (images, labels) in enumerate(loader):
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/dataloader.py", line 630, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/dataloader.py", line 1344, in _next_data
+    return self._process_data(data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/dataloader.py", line 1370, in _process_data
+    data.reraise()
+  File "/usr/local/lib/python3.11/dist-packages/torch/_utils.py", line 706, in reraise
+    raise exception
+PIL.UnidentifiedImageError: Caught UnidentifiedImageError in DataLoader worker process 7.
+Original Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/_utils/worker.py", line 309, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/_utils/fetch.py", line 52, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/_utils/fetch.py", line 52, in <listcomp>
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+            ~~~~~~~~~~~~^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torchvision/datasets/folder.py", line 245, in __getitem__
+    sample = self.loader(path)
+             ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torchvision/datasets/folder.py", line 284, in default_loader
+    return pil_loader(path)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torchvision/datasets/folder.py", line 263, in pil_loader
+    img = Image.open(f)
+          ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/PIL/Image.py", line 3309, in open
+    raise UnidentifiedImageError(msg)
+PIL.UnidentifiedImageError: cannot identify image file <_io.BufferedReader name='/workspace/neurosymbolic-rl/data/imagenet/train/class_0316/01180659.JPEG'>
+

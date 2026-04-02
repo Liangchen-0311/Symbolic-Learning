@@ -1,0 +1,19 @@
+Phase 2 bank: outputs/imagenet_single_bank/phase2/feature_bank
+Phase 3 output: outputs/imagenet_single_bank/phase3
+
+======================================================================
+  PHASE 3: FINAL CLASSIFICATION
+======================================================================
+[FeatureBank] Loaded 2611 formulas from outputs/imagenet_single_bank/phase2/feature_bank
+Loaded 2611 validated formulas
+
+Loading ImageNet at 224x224 (full dataset)...
+[ImageNet] Train: 1180660 images
+[ImageNet] Val: 50000 images
+[ImageNet] Resolution: 224x224
+  Train: 1180660 images
+  Val:   50000 images
+
+Extracting training features (2611 formulas)...
+  [train] batch 1/2306  (512/1180660 images)
+  [train] batch 20/2306  (10240/1180660 images)

@@ -1,0 +1,66 @@
+dataset: imagenet
+device: cuda
+
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  train_subset: null
+  test_subset: null
+  resolution_quick: 64       # Phase 1: fast RL exploration
+  resolution_full: 224       # Phase 2/3: full resolution
+  samples_per_class_quick: 20
+  samples_per_class_full: 50
+  num_classes: 1000
+
+model:
+  max_depth: 7
+  max_sequence_length: 18
+  embedding_dim: 192
+  hidden_size: 384
+  num_layers: 2
+  dropout: 0.1
+
+training:
+  batch_size: 256
+  eval_batch_size: 512
+  iterations: 10000
+  episodes_per_iteration: 150
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  length_penalty: 0.01
+  diversity_penalty: 0.3
+  # Entropy schedule
+  entropy_coef_start: 0.05
+  entropy_coef_end: 0.005
+  entropy_decay_fraction: 0.5
+  # LR warmup
+  lr_warmup_iterations: 100
+
+strategy:
+  feature_bank_size: 12000
+  min_accuracy_threshold: 0.002   # 2x random for 1000 classes
+  correlation_threshold: 0.85
+  correlation_threshold_full: 0.78
+  adaptive_threshold: true
+  threshold_warmup_fraction: 0.5
+  reward_type: loss_based
+  use_hierarchical_eval: true
+  hierarchical_switch_fraction: 0.5
+  diversity_penalty: 0.3
+  l1_lambda: 0.0
+  lasso_epochs: 100
+
+# Single bank for initial pipeline validation
+multi_bank:
+  enabled: false
+
+exclude_operators: []
+checkpoint_interval: 500
+output_dir: outputs/imagenet_single_bank
