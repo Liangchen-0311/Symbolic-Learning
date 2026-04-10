@@ -268,16 +268,16 @@ def step1_phase1a(device):
         print(f"  Already done: {meta.get('total_formulas', '?')} formulas")
         return
 
-    # Launch the existing training script with v3.2 config
-    cmd = (
-        f"PYTHONUNBUFFERED=1 python experiments/train_imagenet_pipeline.py "
-        f"--config {CONFIG_PATH} "
-        f"--device {device} "
-        f"--output_dir {BASE_DIR} "
-        f"--start_phase 1"
-    )
-    print(f"  Running: {cmd}")
-    os.system(cmd)
+    # Directly call run_phase1 to avoid running Phase 2/3 from the old pipeline.
+    # Phase 2 had a terminal-mismatch bug that killed 73% of formulas in v3.
+    # v3.2 skips Phase 2 entirely — quality filtering is done by Phase 1
+    # correlation gate + Phase 3 L1 selection (step4).
+    import yaml
+    from experiments.train_imagenet_pipeline import run_phase1
+
+    with open(CONFIG_PATH) as f:
+        config = yaml.safe_load(f)
+    run_phase1(config, device, phase1_dir)
 
     # Report results
     formulas = load_formulas_from_phase1(phase1_dir)
