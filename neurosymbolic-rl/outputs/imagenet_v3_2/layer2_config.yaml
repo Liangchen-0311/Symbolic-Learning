@@ -1,0 +1,107 @@
+checkpoint_interval: 100
+classifier:
+  epochs: 30
+  train_samples_per_class: 500
+  weight_decay_sweep:
+  - 10
+  - 20
+  - 50
+  - 100
+dataset: imagenet
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  num_classes: 1000
+  resolution_full: 224
+  resolution_quick: 112
+  samples_per_class_full: 20
+  samples_per_class_quick: 20
+device: cuda
+exclude_operators: []
+finetune:
+  classic_kernel_lr: 1.0e-05
+  classifier_lr: 0.001
+  classifier_wd: 10
+  epochs: 10
+  learned_kernel_lr: 0.0001
+  train_samples_per_class: 500
+kernel_bank_path: outputs/imagenet_v3_2/kernel_bank_pretrained.pt
+layer2:
+  early_stop_gain: 0.001
+  enabled: true
+  forward_select_candidates: 500
+  forward_select_sgd_steps: 5
+  max_depth: 5
+  max_sequence_length: 12
+  n_l1_bases: 100
+layer2_selected_bodies: outputs/imagenet_v3_2/layer2/l1_selected_bodies.json
+model:
+  dropout: 0.1
+  embedding_dim: 192
+  hidden_size: 384
+  max_depth: 5
+  max_sequence_length: 12
+  num_layers: 2
+multi_bank:
+  bank_configs:
+  - focus: short
+    max_depth: 4
+    max_sequence_length: 8
+  - binary_op_bias: 0.5
+    focus: cross-channel
+    max_depth: 8
+    max_sequence_length: 20
+  - focus: texture
+    max_depth: 6
+    max_sequence_length: 15
+  - focus: multiscale
+    max_depth: 7
+    max_sequence_length: 18
+  enabled: true
+  num_banks: 4
+output_dir: outputs/imagenet_v3_2/layer2
+phase3:
+  distribution_stats:
+    features_per_body: 60
+    n_regions: 5
+    n_stats: 12
+  fisher_vector:
+    fv_dim: 4096
+    gmm_k: 64
+    n_patches: 64
+    pca_dim: 32
+  interaction_top_k: 500
+  kernel_map:
+    order: 1
+    top_k_features: 20000
+  l1_select_target: 50000
+strategy:
+  adaptive_threshold: true
+  correlation_threshold: 0.92
+  diversity_penalty: 0.3
+  feature_bank_size: 5000
+  hierarchical_switch_fraction: 0.5
+  min_accuracy_threshold: 0.002
+  reward_type: loss_based
+  threshold_warmup_fraction: 0.5
+  use_hierarchical_eval: true
+training:
+  batch_size: 128
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  clip_epsilon: 0.2
+  diversity_penalty: 0.3
+  entropy_coef: 0.05
+  entropy_coef_end: 0.005
+  entropy_coef_start: 0.05
+  entropy_decay_fraction: 0.5
+  episodes_per_iteration: 50
+  eval_batch_size: 128
+  gae_lambda: 0.95
+  gamma: 0.99
+  iterations: 500
+  learning_rate: 0.0003
+  length_penalty: 0.02
+  lr_warmup_iterations: 30
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  value_coef: 0.5

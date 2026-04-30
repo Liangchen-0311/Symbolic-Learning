@@ -268,16 +268,16 @@ def step1_phase1a(device):
         print(f"  Already done: {meta.get('total_formulas', '?')} formulas")
         return
 
-    # Launch the existing training script with v3.2 config
-    cmd = (
-        f"PYTHONUNBUFFERED=1 python experiments/train_imagenet_pipeline.py "
-        f"--config {CONFIG_PATH} "
-        f"--device {device} "
-        f"--output_dir {BASE_DIR} "
-        f"--start_phase 1"
-    )
-    print(f"  Running: {cmd}")
-    os.system(cmd)
+    # Directly call run_phase1 to avoid running Phase 2/3 from the old pipeline.
+    # Phase 2 had a terminal-mismatch bug that killed 73% of formulas in v3.
+    # v3.2 skips Phase 2 entirely — quality filtering is done by Phase 1
+    # correlation gate + Phase 3 L1 selection (step4).
+    import yaml
+    from experiments.train_imagenet_pipeline import run_phase1
+
+    with open(CONFIG_PATH) as f:
+        config = yaml.safe_load(f)
+    run_phase1(config, device, phase1_dir)
 
     # Report results
     formulas = load_formulas_from_phase1(phase1_dir)
@@ -299,152 +299,29 @@ def step1_phase1a(device):
 # ======================================================================
 
 def step2_forward_selection(device):
-    """Select top-100 most complementary Layer 1 formula bodies."""
+    """Select top-100 most complementary Layer 1 bodies via L1 selection.
+
+    Replaces slow greedy forward selection with a single linear model:
+      1. Extract 8 SPP features per body on 20K train images
+      2. Train nn.Linear(n_bodies*8, 1000) with AdamW + L1 penalty
+      3. Rank bodies by weight importance, take top-100
+    """
     print(f"\n{'='*70}")
-    print(f"  STEP 2: Forward Selection — Top-100 Complementary L1 Bodies")
+    print(f"  STEP 2: L1 Selection — Top-100 L1 Bodies")
     print(f"{'='*70}")
 
-    out_dir = BASE_DIR / 'layer2'
-    out_dir.mkdir(parents=True, exist_ok=True)
-    selected_path = out_dir / 'l1_selected_bodies.json'
-
+    selected_path = BASE_DIR / 'layer2' / 'l1_selected_bodies.json'
     if selected_path.exists():
         selected = json.load(open(selected_path))
         print(f"  Already done: {len(selected)} bodies selected")
         return
 
-    # Load all L1 formulas
-    formulas = load_formulas_from_phase1(BASE_DIR / 'phase1')
-    bodies = formulas_to_bodies(formulas)
-    print(f"  Candidate bodies: {len(bodies)}")
-
-    # Load kernel bank
-    kb = SymbolicKernelBank(device=device)
-    kb_path = BASE_DIR / 'kernel_bank_pretrained.pt'
-    if kb_path.exists():
-        kb.load_state_dict(torch.load(str(kb_path), map_location=device, weights_only=True))
-    kb.register_operators(TENSOR_OPERATORS)
-
-    # Prepare validation data (5/class = 5K images)
-    dm = ImageNetDataModule(data_dir=DATA_DIR, resolution=112, batch_size=256,
-                            num_workers=8, samples_per_class=5)
-    dm.setup()
-    val_loader = dm.get_val_loader()
-
-    # Collect all val images + labels
-    all_images, all_labels = [], []
-    for images, labels in val_loader:
-        all_images.append(images)
-        all_labels.append(labels)
-    all_images = torch.cat(all_images, dim=0)
-    all_labels = torch.cat(all_labels, dim=0).to(device)
-    N_val = all_images.shape[0]
-    print(f"  Validation set: {N_val} images")
-
-    # Pre-compute data batch
-    data_batch = build_data_batch(all_images, device)
-    del all_images
-    gc.collect(); torch.cuda.empty_cache()
-
-    # Encode each body with distribution stats
-    def encode_body(body_str):
-        """Execute body and encode with distribution stats → [N, 60]."""
-        try:
-            fm = execute_body(body_str, data_batch)
-            if fm is None:
-                return None
-            return encode_body_distribution_v2(fm)
-        except Exception:
-            return None
-
-    # Greedy forward selection
-    selected = []
-    selected_features = None  # [N_val, D_accumulated]
-    n_target = 100
-    n_candidates_per_round = 500
-
-    print(f"  Running greedy selection ({n_target} rounds, {n_candidates_per_round} candidates/round)")
-    t0 = time.time()
-
-    for round_idx in range(n_target):
-        # Sample candidates
-        remaining = [b for b in bodies if b not in selected]
-        if not remaining:
-            print(f"    Round {round_idx}: no more candidates")
-            break
-
-        if len(remaining) > n_candidates_per_round:
-            candidates = list(np.random.choice(remaining, n_candidates_per_round, replace=False))
-        else:
-            candidates = remaining
-
-        best_gain = -1
-        best_body = None
-        best_feats = None
-
-        for body in candidates:
-            feats = encode_body(body)
-            if feats is None:
-                continue
-
-            # Combine with previously selected
-            if selected_features is not None:
-                combined = torch.cat([selected_features, feats], dim=1)
-            else:
-                combined = feats
-
-            # Quick eval: 5 SGD steps on linear classifier
-            D = combined.shape[1]
-            model = nn.Linear(D, NUM_CLASSES).to(device)
-            opt = torch.optim.SGD(model.parameters(), lr=0.01, weight_decay=1.0)
-            criterion = nn.CrossEntropyLoss()
-
-            # Standardize
-            mean = combined.mean(dim=0, keepdim=True)
-            std = combined.std(dim=0, keepdim=True).clamp(min=1e-8)
-            X = (combined - mean) / std
-
-            for _ in range(5):
-                logits = model(X)
-                loss = criterion(logits, all_labels)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-
-            with torch.no_grad():
-                acc = (model(X).argmax(1) == all_labels).float().mean().item()
-
-            if acc > best_gain:
-                best_gain = acc
-                best_body = body
-                best_feats = feats.detach()
-
-            del model, opt
-            torch.cuda.empty_cache()
-
-        if best_body is None:
-            print(f"    Round {round_idx}: no valid candidate")
-            break
-
-        selected.append(best_body)
-        if selected_features is not None:
-            selected_features = torch.cat([selected_features, best_feats], dim=1)
-        else:
-            selected_features = best_feats
-
-        if (round_idx + 1) % 10 == 0:
-            print(f"    Round {round_idx+1}: acc={best_gain*100:.2f}% "
-                  f"({len(selected)} bodies, {time.time()-t0:.0f}s)")
-
-        # Early stop: check if gain is too small (compare with previous round's best)
-        if round_idx > 0 and best_gain < 0.001:
-            print(f"    Early stopping at round {round_idx+1}: gain < 0.1%")
-            break
-
-    # Save
-    with open(selected_path, 'w') as f:
-        json.dump(selected, f, indent=2)
-    print(f"  Selected {len(selected)} complementary L1 bodies → {selected_path}")
+    # Delegate to standalone script
+    cmd = f"PYTHONUNBUFFERED=1 python experiments/step2_l1_selection.py"
+    print(f"  Running: {cmd}")
+    ret = os.system(cmd)
+    if ret != 0:
+        raise RuntimeError(f"step2_l1_selection.py failed with code {ret}")
 
 
 # ======================================================================
@@ -483,12 +360,15 @@ def step3_phase1b(device):
         with open(l2_config, 'w') as f:
             yaml.dump(cfg, f, default_flow_style=False)
 
+    # Use --skip_phase2 to avoid the Phase 2 terminal-mismatch bug.
+    # v3.2 handles quality filtering via Phase 1 correlation gate + Phase 3 L1 selection.
     cmd = (
         f"PYTHONUNBUFFERED=1 python experiments/train_imagenet_pipeline.py "
         f"--config {l2_config} "
         f"--device {device} "
         f"--output_dir {l2_dir} "
-        f"--start_phase 1"
+        f"--start_phase 1 "
+        f"--skip_phase2"
     )
     print(f"  Running: {cmd}")
     os.system(cmd)
