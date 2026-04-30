@@ -9,9 +9,15 @@ neurosymbolic-rl/data/
 *.h5
 *.json
 *.mmap
+*.pt
+*.pth
+*.npz
 
 # 忽略 Python 缓存
 __pycache__/
 .ipynb_checkpoints/
 .trae-server/
 .vscode/
+.cache/
+.ssh_backup/
+__MACOSX/
