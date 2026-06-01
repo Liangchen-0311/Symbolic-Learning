@@ -1,8 +1,8 @@
 # 忽略数据目录
 neurosymbolic-rl/data/
 symbolic-rl/data/
-symbolic-rl/outputs/
 symbolic-rl/logs/
+# 注：symbolic-rl/outputs/ 保留上传（含训练 checkpoint），但 .pt 仍需 git add -f
 
 # 忽略 macOS / 杂项
 .DS_Store
