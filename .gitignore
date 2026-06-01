@@ -1,6 +1,12 @@
 # 忽略数据目录
 neurosymbolic-rl/data/
+symbolic-rl/data/
+symbolic-rl/outputs/
+symbolic-rl/logs/
 
+# 忽略 macOS / 杂项
+.DS_Store
+**/.DS_Store
 
 # 忽略所有数据文件扩展名
 *.csv

@@ -1,0 +1,123 @@
+dataset: imagenet
+device: cuda
+
+dataset_options:
+  data_dir: /workspace/neurosymbolic-rl/data/imagenet
+  train_subset: null
+  test_subset: null
+  resolution_quick: 112      # v2: 112x112 (was 64x64) — better multi-scale features
+  resolution_full: 224
+  samples_per_class_quick: 20
+  samples_per_class_full: 20
+  num_classes: 1000
+
+model:
+  max_depth: 7
+  max_sequence_length: 18
+  embedding_dim: 192
+  hidden_size: 384
+  num_layers: 2
+  dropout: 0.1
+
+training:
+  batch_size: 128             # smaller batch for 112x112
+  eval_batch_size: 128        # smaller for 112x112
+  iterations: 500             # v2: 500 per bank (was 10000)
+  episodes_per_iteration: 50  # v2: 50 (was 150)
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 0.5
+  n_epochs_ppo: 6
+  batch_size_ppo: 128
+  binary_op_bias: 0.3
+  length_penalty: 0.02
+  diversity_penalty: 0.3
+  entropy_coef_start: 0.05
+  entropy_coef_end: 0.005
+  entropy_decay_fraction: 0.5
+  lr_warmup_iterations: 30
+
+strategy:
+  feature_bank_size: 5000     # v2: 5000 per bank (was 12000)
+  min_accuracy_threshold: 0.002
+  correlation_threshold: 0.92 # v2: relaxed (was 0.85)
+  correlation_threshold_full: 0.95
+  adaptive_threshold: true
+  threshold_warmup_fraction: 0.5
+  reward_type: loss_based
+  use_hierarchical_eval: true
+  hierarchical_switch_fraction: 0.5
+  diversity_penalty: 0.3
+  l1_lambda: 0.0
+  lasso_epochs: 100
+
+# v2: 4-bank multi-bank training
+multi_bank:
+  enabled: true
+  num_banks: 4
+  bank_configs:
+    - {max_depth: 4, max_sequence_length: 8, focus: "short"}             # Bank A: short formulas
+    - {max_depth: 8, max_sequence_length: 20, binary_op_bias: 0.5, focus: "cross-channel"}  # Bank B: cross-channel
+    - {max_depth: 6, max_sequence_length: 15, focus: "texture"}         # Bank C: texture
+    - {max_depth: 7, max_sequence_length: 18, focus: "multiscale"}      # Bank D: multi-scale
+
+exclude_operators: []
+checkpoint_interval: 100
+output_dir: outputs/imagenet_v2
+
+# ============================================================
+# v3.3 additions (Sections 2, 3, 6). Backward compatible:
+# search_algorithm defaults to grpo but ppo + flat paths still run.
+# ============================================================
+
+# --- Section 2: search algorithm (PPO vs GRPO + Pareto) ---
+search_algorithm: grpo          # one of: ppo | grpo  (default grpo for v3.3)
+grpo:
+  group_size: 16
+  acc_tol: 0.003                # accuracy tolerance for parsimony tie-break
+  pareto_objectives: [accuracy, length, depth]
+  crowding_weight: 0.1
+
+# --- Section 6: classifier (HistGB primary) ---
+classifier:
+  type: histgb                  # histgb (PRIMARY) | linear | ebm | reference_gbdt
+  feature_selection: mi         # mi (histgb/ebm) | l1 (linear)
+  mi_subsample: 50000           # images used to estimate MI ranking
+  histgb:
+    coarse: {max_iter: 200, learning_rate: 0.1,  max_depth: 4, K: 500}
+    fine:   {max_iter: 200, learning_rate: 0.05, max_depth: 5, K: 400}
+    early_stopping: true
+    n_iter_no_change: 10
+    l2_regularization: 1.0
+    class_weight: balanced
+  ebm_interactions: 10
+
+# --- Section 3: WordNet hierarchical decomposition ---
+hierarchical:
+  enabled: true                 # MUST be true for any delivered GBDT (Section 6.0)
+  superclass_file: imagenet_superclasses.json
+  coarse_only_warmup: true      # train coarse clf first, then fine clfs
+  soft_cascade: true
+  coarse_classifier_type: linear   # strongest exact interpretability for 20-way routing
+  fine_classifier_type: histgb     # HistGB for the harder intra-superclass split
+
+# --- Section 7: statistical gating (wide admission + strict periodic reshuffle) ---
+# Omit these blocks entirely to keep the legacy single-min_acc gate (fully backward compatible).
+bank_admission:
+  finite_min: 0.95
+  var_min: 1.0e-5             # generous: kills only true constants
+  iqr_min: 1.0e-4
+  keep_min_acc: 0.002         # optional legacy floor; set null for degeneracy-only gating
+bank_reshuffle:
+  enabled: true
+  reshuffle_interval: 100     # GRPO iterations between reshuffles
+  mi_floor: 0.005             # drop formulas with near-zero MI to labels
+  mi_subsample: 50000
+  imp_floor: 1.0e-4           # Lasso/HistGB importance threshold
+  wasserstein_min: 0.05       # distribution-redundancy threshold (0.70-0.92 corr band)
+  min_bank_size: 2000         # never prune below this
+  warmup_iters: 500           # admission-only before this many iterations
