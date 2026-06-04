@@ -16,7 +16,8 @@ import torch.nn.functional as F_func
 import numpy as np
 from typing import Tuple, Dict, Any, Optional
 from src.symbolic.program import SymbolicProgram
-from src.symbolic.tensor_operators import TENSOR_OPERATORS, ROOT_OPERATORS, MULTI_DIM_OPERATORS
+from src.symbolic.tensor_operators import (
+    TENSOR_OPERATORS, ROOT_OPERATORS, MULTI_DIM_OPERATORS, TensorOperators)
 from src.symbolic.large_feature_bank import LargeFeatureBank
 from src.rl.tensor_action_masking import TensorActionMasker
 from src.rl.rpn_grammar_mask import RPNGrammarMask
@@ -25,7 +26,8 @@ from src.rl.rpn_grammar_mask import RPNGrammarMask
 class TensorTokenVocabulary:
     """Vocabulary for tensor-based VSR."""
 
-    def __init__(self, exclude_operators=None, extra_terminals=None):
+    def __init__(self, exclude_operators=None, extra_terminals=None,
+                 prior_terminals=None):
         # Special tokens
         special_tokens = ['START', 'END', 'PAD']
 
@@ -39,6 +41,13 @@ class TensorTokenVocabulary:
         # Terminals (RGB + grayscale + HSV + color ratios + opponent channels)
         terminal_tokens = ['I_R', 'I_G', 'I_B', 'I_GRAY', 'I_H', 'I_S',
                            'I_r', 'I_g', 'I_RG', 'I_BY']
+
+        # v3.3 Section 1A.0: deterministic pre-computed prior terminals (I_EDGE/I_FREQ/...)
+        # Config-toggleable leaf nodes (Sobel/detail/laplacian) so formulas can start from
+        # a higher-level map. They begin with 'I_' so the RPN mask treats them as terminals.
+        if prior_terminals:
+            terminal_tokens.extend(prior_terminals)
+            print(f"  [Vocab] Prior terminals (1A.0): {prior_terminals}")
 
         # Layer 2: additional terminals from Layer 1 feature maps
         if extra_terminals:
@@ -155,11 +164,22 @@ class TensorVSREnvironmentLargeBank(gym.Env):
             self.l1_terminal_names = [f'L1_{i}' for i in range(len(self.l1_bodies))]
             print(f"  [L2] Loaded {len(self.l1_bodies)} Layer 1 bodies as terminals")
 
+        # v3.3 Section 1A.0: deterministic prior terminals (config-toggleable).
+        # e.g. prior_terminals: [I_EDGE, I_FREQ]  (subset of I_EDGE/I_FREQ/I_LAPLACIAN)
+        self.prior_terminals = config.get('prior_terminals', []) or []
+        valid_priors = {'I_EDGE', 'I_FREQ', 'I_LAPLACIAN'}
+        bad = [t for t in self.prior_terminals if t not in valid_priors]
+        if bad:
+            raise ValueError(f"Unknown prior_terminals {bad}; valid: {sorted(valid_priors)}")
+        if self.prior_terminals:
+            print(f"  [Env] Prior terminals enabled (1A.0): {self.prior_terminals}")
+
         # Vocabulary (optionally exclude operators like spp_pool)
         self.exclude_operators = config.get('exclude_operators', []) or []
         self.vocabulary = TensorTokenVocabulary(
             exclude_operators=self.exclude_operators,
             extra_terminals=self.l1_terminal_names if self.l1_bodies else None,
+            prior_terminals=self.prior_terminals,
         )
 
         # GPU-side data augmentation
@@ -337,6 +357,12 @@ class TensorVSREnvironmentLargeBank(gym.Env):
             'I_RG': I_RG,
             'I_BY': I_BY,
         }
+
+        # v3.3 Section 1A.0: deterministic prior terminals (computed once per batch,
+        # FP32, no learning). Only those enabled in config are added to the vocabulary.
+        if self.prior_terminals:
+            priors = TensorOperators.make_prior_terminals(I_GRAY, names=self.prior_terminals)
+            terminal_values.update(priors)
 
         # Layer 2: compute L1 feature maps as extra terminals
         if self.l1_bodies:

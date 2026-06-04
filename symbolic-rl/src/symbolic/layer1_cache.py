@@ -20,12 +20,16 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from src.symbolic.tensor_operators import TENSOR_OPERATORS, ROOT_OPERATORS
+from src.symbolic.tensor_operators import TENSOR_OPERATORS, ROOT_OPERATORS, TensorOperators
 
 
 def build_data_batch(images, device):
-    """Build the 10 terminal channels (RGB + grayscale + HSV + ratios + opponent) from a
-    batch of [B, 3, H, W] images in [0,1]. Matches the channels used during Layer-1 search."""
+    """Build the terminal channels (RGB + grayscale + HSV + ratios + opponent + the v3.3
+    Section 1A.0 deterministic prior terminals I_EDGE/I_FREQ/I_LAPLACIAN) from a batch of
+    [B, 3, H, W] images in [0,1]. Matches the channels available during Layer-1 search so
+    any discovered body (including ones that reference a prior terminal) stays re-executable
+    downstream (traceability — Hard Constraint #4). Prior terminals are cheap and added
+    unconditionally; unused keys are simply never popped by `execute_body_map`."""
     images = images.to(device, dtype=torch.float32)
     I_R, I_G, I_B = images[:, 0], images[:, 1], images[:, 2]
     I_GRAY = 0.2989 * I_R + 0.5870 * I_G + 0.1140 * I_B
@@ -42,11 +46,14 @@ def build_data_batch(images, device):
     Hh = Hh / 6.0
     S = torch.where(Cmax > 1e-8, delta / (Cmax + 1e-8), torch.zeros_like(Cmax))
     total = I_R + I_G + I_B + 1e-8
-    return {
+    db = {
         'I_R': I_R, 'I_G': I_G, 'I_B': I_B, 'I_GRAY': I_GRAY,
         'I_H': Hh, 'I_S': S, 'I_r': I_R / total, 'I_g': I_G / total,
         'I_RG': I_R - I_G, 'I_BY': I_B - (I_R + I_G) / 2,
     }
+    # v3.3 Section 1A.0 deterministic prior terminals (keep downstream re-executable).
+    db.update(TensorOperators.make_prior_terminals(I_GRAY))
+    return db
 
 
 def execute_body_map(body_str, data_batch):

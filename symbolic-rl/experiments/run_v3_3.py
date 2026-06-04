@@ -34,12 +34,16 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.symbolic.tensor_operators import TENSOR_OPERATORS
+from src.symbolic.tensor_operators import TENSOR_OPERATORS, expand_formula_statistics
 from src.symbolic.layer1_cache import Layer1Cache, build_data_batch, execute_body_map
 from src.symbolic.layer2_enumerate import (
     enumerate_layer2, compute_layer2_features, save_layer2,
 )
 from src.models.classifiers import normalize_features
+from src.interpretability.formula_to_text import formula_to_text
+from src.interpretability.occlusion_test import occlusion_curve
+from src.interpretability.probe_images import top_bottom_activators
+from src.rl.formula_utils import rpn_depth
 from experiments.compare_classifiers import run_comparison, render as render_comparison
 from experiments.select_layer1_top30 import select_top30
 
@@ -67,7 +71,10 @@ DEFAULT_SEED_BODIES = [
 ]
 
 NEW_OPERATORS = ['blob_detector', 'symmetry_v', 'symmetry_h', 'contour',
-                 'elongation', 'radial_gradient', 'fuzzy_not', 'fuzzy_and', 'fuzzy_or']
+                 'elongation', 'radial_gradient', 'fuzzy_not', 'fuzzy_and', 'fuzzy_or',
+                 # v3.3 revision: directional lines (1A.4, tensor) + asymmetry (1A.3, scalar)
+                 'line_h', 'line_v', 'line_diag45', 'line_diag135',
+                 'pool_lr_asymmetry', 'pool_tb_asymmetry']
 
 
 # --------------------------------------------------------------------------
@@ -78,9 +85,10 @@ def stage_operator_sanity():
     x = torch.randn(4, 16, 16, dtype=torch.float32)
     results = {}
     for name in NEW_OPERATORS:
-        fn, arity, _ = TENSOR_OPERATORS[name]
+        fn, arity, otype = TENSOR_OPERATORS[name]
         out = fn(x) if arity == 1 else fn(x, x)
-        ok = (out.shape == (4, 16, 16) and torch.isfinite(out).all().item()
+        expected = (4,) if otype == 'scalar' else (4, 16, 16)
+        ok = (tuple(out.shape) == expected and torch.isfinite(out).all().item()
               and out.dtype == torch.float32)
         results[name] = bool(ok)
     n_ok = sum(results.values())
@@ -168,6 +176,27 @@ def statistical_layer1_features(bodies, images, device='cpu', stat_pools=None):
                 s = s.mean(dim=1)
             feats.append(s)
             names.append(f"L1stat:{b} {pool}")
+    X = torch.stack(feats, dim=1) if feats else torch.empty(len(images), 0)
+    return X.cpu().numpy(), names
+
+
+def expand_layer1_statistics(bodies, images, device='cpu'):
+    """One-formula-many-pools DEFAULT expansion (Section 1A.6): apply the canonical fixed
+    14-stat battery (`expand_formula_statistics`) to each Layer-1 body feature-map. Unlike
+    `statistical_layer1_features` (which pools with the RL 1A.2 statistical *operators* for
+    the 6A synergy ablation), this is the deterministic default battery — mean/std/range/
+    median/q10/q90/iqr/skewness/kurtosis/l1/l2/max/min/above_mean_ratio — applied post-hoc
+    to ALL bodies, with traceable `formula[i].<stat>` names. Section 4D feature extraction."""
+    db = build_data_batch(images, device)
+    feats, names = [], []
+    for i, b in enumerate(bodies):
+        m = execute_body_map(b, db)
+        if m is None:
+            continue
+        stats = expand_formula_statistics(m, formula_idx=i)
+        for name, s in stats.items():
+            feats.append(s)
+            names.append(name)
     X = torch.stack(feats, dim=1) if feats else torch.empty(len(images), 0)
     return X.cpu().numpy(), names
 
@@ -324,6 +353,11 @@ def stage_cifar10(bodies, args, device='cpu'):
     Xtr_stat, stat_names = statistical_layer1_features(top_bodies, train_imgs, device)
     Xte_stat, _ = statistical_layer1_features(top_bodies, test_imgs, device)
     out['n_stat_features'] = Xtr_stat.shape[1]
+
+    # --- Section 1A.6: one-formula-many-pools default battery (canonical 14-stat) ---
+    Xtr_batt, batt_names = expand_layer1_statistics(top_bodies, train_imgs, device)
+    Xte_batt, _ = expand_layer1_statistics(top_bodies, test_imgs, device)
+    out['n_multipool_features'] = Xtr_batt.shape[1]
     try:
         out['stat_histgb_synergy'] = histgb_synergy_ablation(
             Xtr_combo, Xte_combo, Xtr_stat, Xte_stat, train_y.numpy(), test_y.numpy())
@@ -336,18 +370,56 @@ def stage_cifar10(bodies, args, device='cpu'):
     except Exception as e:
         out['gating_ablation_error'] = str(e)
 
-    # --- Section 6 classifier comparison on the combined (L1+L2+stat) feature matrix ---
-    Xtr_full = np.concatenate([Xtr_combo, Xtr_stat], axis=1)
-    Xte_full = np.concatenate([Xte_combo, Xte_stat], axis=1)
+    # --- Section 6 classifier comparison on the combined (L1+L2+stat+multipool) matrix ---
+    Xtr_full = np.concatenate([Xtr_combo, Xtr_stat, Xtr_batt], axis=1)
+    Xte_full = np.concatenate([Xte_combo, Xte_stat, Xte_batt], axis=1)
     X_all = np.concatenate([Xtr_full, Xte_full], axis=0)
     y_all = np.concatenate([train_y.numpy(), test_y.numpy()])
     feat_names = ([f"L1:{b}" for b in valid] +
-                  [f"L2:{f['rpn_l1']}" for f in l2] + stat_names)
+                  [f"L2:{f['rpn_l1']}" for f in l2] + stat_names + batt_names)
     try:
         comp = run_comparison(X_all, y_all, feature_names=feat_names)
         out['classifier_comparison'] = comp
     except Exception as e:
         out['classifier_comparison_error'] = str(e)
+
+    # --- Section 8: interpretability + trust-verification on the resulting features ---
+    try:
+        sec8 = {}
+        # 8.4 quantitative metrics: length / depth / readable fraction over delivered bodies
+        lengths = [len(b.split()) for b in valid]
+        depths = [rpn_depth(b.split()) for b in valid]
+        if lengths:
+            sec8['mean_length'] = round(float(np.mean(lengths)), 2)
+            sec8['mean_depth'] = round(float(np.mean(depths)), 2)
+            sec8['readable_fraction_len_le6'] = round(
+                float(np.mean([l <= 6 for l in lengths])), 3)
+        # 8.2d formula→text for the top bodies (always works, no data needed)
+        sec8['formula_readings'] = [
+            {'rpn': b, 'reading': formula_to_text(b)} for b in valid[:5]]
+        # 8.2c probe: top/bottom activator indices for the longest (least readable) body
+        if valid:
+            longest = max(valid, key=lambda b: len(b.split()))
+            act = top_bottom_activators(longest, test_imgs, k=6, device=device)
+            sec8['probe_longest'] = {
+                'rpn': longest, 'reading': formula_to_text(longest),
+                'top_idx': [int(i) for i in act['top_idx']],
+                'bottom_idx': [int(i) for i in act['bottom_idx']]}
+        # 8.2a occlusion: object(center) vs background, using L1 features + a linear clf.
+        # Relative retention is the signal, so raw pooled features (recomputable from masked
+        # images) suffice for an internally-consistent curve.
+        if valid:
+            occ_clf = LinearClassifier(10).fit(Xtr_l1, train_y.numpy())
+            feature_fn = lambda imgs: pooled_layer1_features(valid, imgs, device)[0]
+            sec8['occlusion_center'] = occlusion_curve(
+                test_imgs, test_y.numpy(), feature_fn, occ_clf,
+                fractions=(0.0, 0.5, 0.75), mode='center')
+            sec8['occlusion_background'] = occlusion_curve(
+                test_imgs, test_y.numpy(), feature_fn, occ_clf,
+                fractions=(0.0, 0.5, 0.75), mode='background')
+        out['interpretability'] = sec8
+    except Exception as e:
+        out['interpretability_error'] = str(e)
 
     # --- Decision gate ---
     delta = out['layer2_delta']
@@ -422,6 +494,37 @@ def write_report(path, sanity, cifar, args, imagenet=None):
             L.append(f"- Reshuffle: {ga['reshuffle_log']}")
             L.append(f"- Takeaway: the legacy gate admits degenerate columns (a constant feature "
                      f"has ~chance accuracy ≫ the 0.002 floor); admission+reshuffle removes them.\n")
+
+        # Section 1A.6 — one-formula-many-pools default battery
+        if cifar.get('n_multipool_features') is not None:
+            L.append("### Section 1A.6 — one-formula-many-pools default")
+            L.append(f"- Canonical 14-stat battery applied to {cifar['n_bodies_top']} bodies "
+                     f"→ {cifar['n_multipool_features']} `formula[i].<stat>` features "
+                     f"(added to the comparison matrix).\n")
+
+        # Section 8 — interpretability + trust-verification
+        s8 = cifar.get('interpretability')
+        if s8:
+            L.append("### Section 8 — interpretability & trust-verification")
+            if 'mean_length' in s8:
+                L.append(f"- Quantitative (8.4): mean length {s8['mean_length']}, mean depth "
+                         f"{s8['mean_depth']}, readable fraction (≤6 tokens) "
+                         f"{s8['readable_fraction_len_le6']*100:.0f}%")
+            for fr in s8.get('formula_readings', [])[:3]:
+                L.append(f"  - `{fr['rpn']}`  →  *{fr['reading']}*")
+            oc = s8.get('occlusion_center'); ob = s8.get('occlusion_background')
+            if oc and ob:
+                L.append(f"- Occlusion (8.2a): center-occlusion retained "
+                         f"{oc['retained'][-1]*100:.0f}% of baseline → {oc['verdict']}; "
+                         f"background-occlusion retained {ob['retained'][-1]*100:.0f}% → {ob['verdict']}")
+            pr = s8.get('probe_longest')
+            if pr:
+                L.append(f"- Probe (8.2c) longest body `{pr['rpn']}` top activators "
+                         f"{pr['top_idx']} (render via probe_images.save_probe_montage)")
+            L.append("- Selling point on levels 1+3+5 (mechanistic transparency + decision "
+                     "attribution + causal verifiability); level-2/4 limits stated honestly.\n")
+        elif cifar.get('interpretability_error'):
+            L.append(f"_Interpretability step error: {cifar['interpretability_error']}_\n")
 
         if cifar.get('top_l2'):
             L.append("### Example discovered Layer-2 formulas")

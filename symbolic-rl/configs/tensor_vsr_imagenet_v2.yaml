@@ -74,6 +74,11 @@ output_dir: outputs/imagenet_v2
 # search_algorithm defaults to grpo but ppo + flat paths still run.
 # ============================================================
 
+# --- Section 1A.0: deterministic prior terminals (config-toggleable) ---
+# Leaf nodes computed by fixed Sobel/detail/laplacian transforms (no learning) so the
+# agent can start formulas from a higher-level map. Empty list disables them.
+prior_terminals: [I_EDGE, I_FREQ]   # subset of [I_EDGE, I_FREQ, I_LAPLACIAN]
+
 # --- Section 2: search algorithm (PPO vs GRPO + Pareto) ---
 search_algorithm: grpo          # one of: ppo | grpo  (default grpo for v3.3)
 grpo:
@@ -81,6 +86,9 @@ grpo:
   acc_tol: 0.003                # accuracy tolerance for parsimony tie-break
   pareto_objectives: [accuracy, length, depth]
   crowding_weight: 0.1
+  # Section 2E: parsimony strength. If omitted, the entrypoint derives it from
+  # classifier.type (linear/ebm → 1e-3 strict; histgb → 2e-4 relaxed).
+  lambda_len: 2.0e-4            # histgb is primary → relaxed (keep non-linear long formulas)
 
 # --- Section 6: classifier (HistGB primary) ---
 classifier:

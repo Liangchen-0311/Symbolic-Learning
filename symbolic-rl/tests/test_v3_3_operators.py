@@ -151,14 +151,74 @@ def test_fuzzy_binary_formula_executes():
     assert torch.isfinite(output).all()
 
 
+# --- v3.3 revision additions: directional lines (1A.4), asymmetry (1A.3),
+#     prior terminals (1A.0), one-formula-many-pools (1A.6) ---
+DIRECTIONAL_LINES = ['line_h', 'line_v', 'line_diag45', 'line_diag135']
+ASYMMETRY_POOLS = ['pool_lr_asymmetry', 'pool_tb_asymmetry']
+
+
+def test_directional_lines_unary_tensor():
+    from src.symbolic.tensor_operators import ROOT_OPERATORS
+    x = torch.randn(4, 32, 32, dtype=torch.float32)
+    for name in DIRECTIONAL_LINES:
+        fn, arity, otype = TENSOR_OPERATORS[name]
+        assert arity == 1 and otype == 'tensor', name
+        assert name not in ROOT_OPERATORS, f"{name} must NOT be a root op"
+        out = fn(x)
+        assert out.shape == (4, 32, 32) and out.dtype == torch.float32
+        assert torch.isfinite(out).all(), name
+
+
+def test_asymmetry_pools_scalar_root():
+    from src.symbolic.tensor_operators import ROOT_OPERATORS
+    x = torch.randn(4, 32, 32, dtype=torch.float32)
+    for name in ASYMMETRY_POOLS:
+        fn, arity, otype = TENSOR_OPERATORS[name]
+        assert arity == 1 and otype == 'scalar', name
+        assert name in ROOT_OPERATORS, f"{name} must be a root op"
+        out = fn(x)
+        assert out.shape == (4,) and torch.isfinite(out).all(), name
+    # a symmetric image has ~zero asymmetry
+    sym = torch.ones(2, 8, 8, dtype=torch.float32)
+    assert float(TensorOperators.pool_lr_asymmetry(sym).abs().max()) < 1e-5
+
+
+def test_prior_terminals_deterministic():
+    x = torch.rand(4, 16, 16, dtype=torch.float32)
+    p = TensorOperators.make_prior_terminals(x)
+    assert set(p) == {'I_EDGE', 'I_FREQ', 'I_LAPLACIAN'}
+    for k, v in p.items():
+        assert v.shape == (4, 16, 16) and v.dtype == torch.float32
+        assert torch.isfinite(v).all(), k
+    # deterministic + subset selection
+    p2 = TensorOperators.make_prior_terminals(x, names=['I_EDGE'])
+    assert set(p2) == {'I_EDGE'} and torch.allclose(p2['I_EDGE'], p['I_EDGE'])
+
+
+def test_expand_formula_statistics_battery():
+    from src.symbolic.tensor_operators import expand_formula_statistics
+    x = torch.randn(4, 16, 16, dtype=torch.float32)
+    stats = expand_formula_statistics(x, formula_idx=3)
+    assert len(stats) == 14, f"expected 14-stat battery, got {len(stats)}"
+    assert all(k.startswith('formula[3].') for k in stats)
+    for k, v in stats.items():
+        assert v.shape == (4,) and torch.isfinite(v).all(), k
+
+
+def test_directional_line_formula_executes():
+    from src.symbolic.tensor_evaluator import TensorProgramEvaluator
+    evaluator = TensorProgramEvaluator(num_classes=10, device='cpu')
+    data_batch = {'I_R': torch.rand(4, 32, 32, dtype=torch.float32)}
+    tokens = ['I_R', 'line_diag45', 'pool_lr_asymmetry']
+    output, is_valid = evaluator.execute_formula(tokens, _IdentityVocab(), data_batch)
+    assert is_valid and output is not None
+    assert output.shape == (4,) and torch.isfinite(output).all()
+
+
 if __name__ == '__main__':
-    test_registry_grew_by_twenty()
-    test_statistical_pooling_shape_and_finite()
-    test_unary_shape_and_finite()
-    test_binary_shape_and_finite()
-    test_binary_mismatched_sizes()
-    test_fuzzy_outputs_in_unit_interval()
-    test_formula_executes_end_to_end()
-    test_fuzzy_binary_formula_executes()
-    test_statistical_pool_formula_executes()
-    print('All v3.3 Section 1 operator tests passed.')
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith('test_') and callable(v)]
+    for fn in fns:
+        fn()
+        print(f"PASS {fn.__name__}")
+    print(f"\nAll {len(fns)} v3.3 Section 1 operator tests passed.")

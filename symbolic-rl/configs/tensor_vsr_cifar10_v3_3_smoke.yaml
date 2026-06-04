@@ -1,0 +1,67 @@
+# Minimal v3.3 launch smoke test on CIFAR-10.
+# Goal: confirm GRPO + new operators (semantic/statistical/fuzzy) + env + admission
+# all wire together on real data. NOT a real run (3 iters, tiny subset).
+
+model:
+  max_depth: 3
+  max_sequence_length: 7
+  embedding_dim: 128
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.3
+
+training:
+  batch_size: 32
+  eval_batch_size: 256
+  n_iterations: 3                # smoke: just a few GRPO iterations
+  episodes_per_iteration: 8      # GRPO group size per update
+  learning_rate: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.05
+  max_grad_norm: 1.0
+  n_epochs_ppo: 2
+  batch_size_ppo: 32
+  feature_bank_size: 50
+  lasso_target_features: 30
+  min_accuracy: 0.10
+  min_diversity: 0.15
+  l1_lambda: 0.5
+  lasso_epochs: 50
+  lasso_prune_interval: 50
+  length_penalty: 0.01
+  inactive_penalty: 0.05
+  diversity_penalty: 0.3
+  device: "cpu"
+
+# v3.3 Section 1A.0: deterministic prior terminals (exercise wiring on real data)
+prior_terminals: [I_EDGE, I_FREQ]
+
+# v3.3 Section 2: use GRPO
+search_algorithm: grpo
+grpo:
+  group_size: 8
+  acc_tol: 0.003
+  pareto_objectives: [accuracy, length, depth]
+  crowding_weight: 0.1
+  lambda_len: 2.0e-4             # relaxed (histgb-style); entrypoint also derives by classifier
+
+# v3.3 Section 7A: wide degeneracy admission gate (exercise on real data)
+bank_admission:
+  finite_min: 0.95
+  var_min: 1.0e-5
+  iqr_min: 1.0e-4
+  keep_min_acc: 0.002
+
+dataset:
+  name: "cifar10"
+  num_classes: 10
+
+dataset_options:
+  train_subset: 2000             # tiny subset for a fast launch test
+  test_subset: 500
+
+operators:
+  spatial_pooling: true

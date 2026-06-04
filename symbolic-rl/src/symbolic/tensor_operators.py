@@ -526,6 +526,41 @@ class TensorOperators:
         return ex * rx + ey * ry          # projection of gradient onto radial direction
 
     # ============================================
+    # Directional Line/Ridge Operators (v3.3 Section 1A.4, unary tensor)
+    # ============================================
+    # Multi-orientation ridge detectors — finer orientation selectivity than a single
+    # gabor_mag. Second-derivative ("line") kernels respond to thin ridges/lines at a
+    # given orientation. Deterministic fixed kernels (no learning).
+
+    @staticmethod
+    def line_h(x):
+        """Horizontal line/ridge response (second derivative across rows): [B,H,W] → [B,H,W]."""
+        k = torch.tensor([[-1., -1., -1.], [2., 2., 2.], [-1., -1., -1.]],
+                         device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+    @staticmethod
+    def line_v(x):
+        """Vertical line/ridge response: [B,H,W] → [B,H,W]."""
+        k = torch.tensor([[-1., 2., -1.], [-1., 2., -1.], [-1., 2., -1.]],
+                         device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+    @staticmethod
+    def line_diag45(x):
+        """45° diagonal line/ridge response: [B,H,W] → [B,H,W]."""
+        k = torch.tensor([[-1., -1., 2.], [-1., 2., -1.], [2., -1., -1.]],
+                         device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+    @staticmethod
+    def line_diag135(x):
+        """135° diagonal line/ridge response: [B,H,W] → [B,H,W]."""
+        k = torch.tensor([[2., -1., -1.], [-1., 2., -1.], [-1., -1., 2.]],
+                         device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
+        return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+    # ============================================
     # Fuzzy-Logic Operators (v3.3) — probabilistic t-norms
     # ============================================
     # Product/probabilistic form (not min/max): differentiable everywhere (needed for
@@ -955,6 +990,25 @@ class TensorOperators:
         return cov / (fx.std(dim=1) * fy.std(dim=1) + 1e-8)
 
     # ============================================
+    # Asymmetry Pooling (v3.3 Section 1A.3, root-only)
+    # ============================================
+    # General-purpose symmetry-break detectors: faces/cars/animals are often symmetric,
+    # and symmetry BREAKS flag unilateral / anomalous structure. Scalar output → ROOT ops.
+
+    @staticmethod
+    def pool_lr_asymmetry(x):
+        """Mean absolute left-right difference |x - fliplr(x)| pooled: [B,H,W] → [B].
+        high = left/right halves differ (unilateral structure); low = symmetric."""
+        flipped = torch.flip(x, dims=[-1])
+        return torch.abs(x - flipped).mean(dim=(-2, -1))
+
+    @staticmethod
+    def pool_tb_asymmetry(x):
+        """Mean absolute top-bottom difference |x - flipud(x)| pooled: [B,H,W] → [B]."""
+        flipped = torch.flip(x, dims=[-2])
+        return torch.abs(x - flipped).mean(dim=(-2, -1))
+
+    # ============================================
     # Spatial Pyramid Pooling (SPP) — kept as utility, NOT registered
     # ============================================
 
@@ -983,6 +1037,92 @@ class TensorOperators:
 
         # Concatenate: [batch, 1+4+16] = [batch, 21]
         return torch.cat([pool_1x1, pool_2x2, pool_4x4], dim=1)
+
+    # ============================================
+    # Deterministic Prior Terminals (v3.3 Section 1A.0)
+    # ============================================
+    @staticmethod
+    def make_prior_terminals(img_gray, names=None):
+        """Pre-computed deterministic prior terminals (NOT learned, no external model).
+
+        These are fixed transforms of the grayscale image, registered as RPN leaf
+        terminals (alongside I_R/I_G/I_B/I_GRAY) so the agent can start formulas from an
+        edge/detail/laplacian map instead of re-deriving it — shorter formulas, freed
+        search budget. Keeps Hard Constraint #5 (no external pretrained knowledge): every
+        map is an explicit Sobel/blur/laplacian formula on the pixels.
+
+        Args:
+            img_gray: [B, H, W] grayscale image (FP32).
+            names: optional subset of {'I_EDGE','I_FREQ','I_LAPLACIAN'} to compute.
+                   None → all three.
+        Returns:
+            dict[str, Tensor] of [B, H, W] FP32 maps for the requested terminals.
+        """
+        wanted = set(names) if names is not None else {'I_EDGE', 'I_FREQ', 'I_LAPLACIAN'}
+        out = {}
+        if 'I_EDGE' in wanted:
+            # Sobel gradient magnitude — the collaborator's I_EDGE_PRIOR.
+            gx = TensorOperators.edge_x(img_gray)
+            gy = TensorOperators.edge_y(img_gray)
+            out['I_EDGE'] = torch.sqrt(gx * gx + gy * gy + 1e-8)
+        if 'I_FREQ' in wanted:
+            # High-frequency residual = image - 5x5 blur (detail/texture prior).
+            blurred = F.avg_pool2d(img_gray.unsqueeze(1), 5, 1, 2).squeeze(1)
+            out['I_FREQ'] = img_gray - blurred
+        if 'I_LAPLACIAN' in wanted:
+            # Second-derivative edge prior.
+            out['I_LAPLACIAN'] = TensorOperators.laplacian(img_gray)
+        return out
+
+
+# Battery of statistical pools for the one-formula-many-pools default (v3.3 Section 1A.6).
+# Each maps a formula body feature-map [B,H,W] → one scalar [B]; names follow the study's
+# `formula[i].<stat>` convention so features stay fully traceable.
+FORMULA_STAT_POOLS = {
+    'mean':            lambda f: f.mean(dim=(-2, -1)),
+    'std':             lambda f: f.std(dim=(-2, -1)),
+    'range':           lambda f: f.amax(dim=(-2, -1)) - f.amin(dim=(-2, -1)),
+    'median':          lambda f: torch.median(f.reshape(f.shape[0], -1), dim=1).values,
+    'q10':             TensorOperators.pool_q10,
+    'q90':             TensorOperators.pool_q90,
+    'iqr':             TensorOperators.pool_iqr,
+    'skewness':        TensorOperators.pool_skewness,
+    'kurtosis':        TensorOperators.pool_kurtosis,
+    'l1_norm':         lambda f: f.abs().mean(dim=(-2, -1)),
+    'l2_norm':         lambda f: torch.sqrt((f * f).mean(dim=(-2, -1)) + 1e-8),
+    'max':             lambda f: f.amax(dim=(-2, -1)),
+    'min':             lambda f: f.amin(dim=(-2, -1)),
+    'above_mean_ratio': TensorOperators.pool_above_mean_ratio,
+}
+
+
+def expand_formula_statistics(feature_map, formula_idx=None):
+    """One-formula-many-pools default expansion (v3.3 Section 1A.6).
+
+    Given a formula BODY feature-map (the pre-final-pool 2D map), compute a fixed battery
+    of statistical pools. The same formula thus yields ~14 non-redundant scalar features
+    (range = dynamic span, std = dispersion, median = typical value, …) and the downstream
+    classifier (HistGB) / MI selection / reshuffle decide which to keep. Deterministic;
+    does NOT consume RL search budget (applied post-hoc to bank bodies).
+
+    Args:
+        feature_map: [B, H, W] FP32 body feature-map.
+        formula_idx: optional int; if given, names are `formula[idx].<stat>`,
+                     else just `<stat>`.
+    Returns:
+        dict[str, Tensor]: {name: [B] scalar feature}.
+    """
+    if feature_map.dim() == 4 and feature_map.shape[1] == 1:
+        feature_map = feature_map.squeeze(1)
+    prefix = f'formula[{formula_idx}].' if formula_idx is not None else ''
+    out = {}
+    for stat, fn in FORMULA_STAT_POOLS.items():
+        try:
+            v = fn(feature_map)
+            out[f'{prefix}{stat}'] = torch.nan_to_num(v, nan=0.0, posinf=1e4, neginf=-1e4)
+        except Exception:
+            out[f'{prefix}{stat}'] = torch.zeros(feature_map.shape[0], device=feature_map.device)
+    return out
 
 
 # ============================================
@@ -1153,6 +1293,12 @@ TENSOR_OPERATORS = {
     'elongation':     (TensorOperators.elongation, 1, 'tensor'),
     'radial_gradient':(TensorOperators.radial_gradient, 1, 'tensor'),
 
+    # --- v3.3 directional line operators (1A.4, unary tensor) ---
+    'line_h':       (TensorOperators.line_h, 1, 'tensor'),
+    'line_v':       (TensorOperators.line_v, 1, 'tensor'),
+    'line_diag45':  (TensorOperators.line_diag45, 1, 'tensor'),
+    'line_diag135': (TensorOperators.line_diag135, 1, 'tensor'),
+
     # --- v3.3 fuzzy logic ---
     'fuzzy_not': (TensorOperators.fuzzy_not, 1, 'tensor'),
     'fuzzy_and': (TensorOperators.fuzzy_and, 2, 'tensor'),
@@ -1173,6 +1319,10 @@ TENSOR_OPERATORS = {
     # Tier 3 (optional — gate on CIFAR ablation)
     'pool_neighbor_diff_var':(TensorOperators.pool_neighbor_diff_var, 1, 'scalar'),
     'pool_autocorr_lag1':   (TensorOperators.pool_autocorr_lag1, 1, 'scalar'),
+
+    # --- v3.3 asymmetry pooling (1A.3, SCALAR output → ROOT ops) ---
+    'pool_lr_asymmetry': (TensorOperators.pool_lr_asymmetry, 1, 'scalar'),
+    'pool_tb_asymmetry': (TensorOperators.pool_tb_asymmetry, 1, 'scalar'),
 
     # Global pooling (root-only)
     'global_avg_pool': (TensorOperators.global_avg_pool, 1, 'scalar'),
@@ -1269,6 +1419,9 @@ ROOT_OPERATORS = {
     'pool_uniformity',
     'pool_neighbor_diff_var',
     'pool_autocorr_lag1',
+    # Asymmetry pooling (v3.3 Section 1A.3)
+    'pool_lr_asymmetry',
+    'pool_tb_asymmetry',
 }
 
 # Multi-dimensional root operators (output more than 1 value per sample)

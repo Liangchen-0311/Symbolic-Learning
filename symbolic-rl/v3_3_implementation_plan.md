@@ -1,8 +1,27 @@
 # v3.3 Implementation Plan — for Claude Code
 
-> **Audience**: This document is an execution spec for Claude Code. It describes five upgrades to an existing symbolic-feature-discovery codebase for image classification. Implement them in the order given. Each section states **what to build**, **where it goes**, **acceptance criteria**, and **constraints**.
+> **Audience**: This document is an execution spec for Claude Code. It describes eight sections of upgrades to an existing symbolic-feature-discovery codebase for image classification. Implement them in the order given (see "Suggested Implementation Order"). Each section states **what to build**, **where it goes**, **acceptance criteria**, and **constraints**.
 >
 > **Project recap**: An RL agent (currently PPO) discovers symbolic formulas (RPN token sequences of image operators). Each formula maps an image → a scalar feature. An **interpretable, neuron-free classifier** is trained on these features. **Primary delivered classifier: HistGB + MI + sample_weight** (a collaborator-validated method that beats linear on small problems). **Reference: `nn.Linear`** (kept as the exact-additive-decomposition interpretability baseline and regression guard). See Section 6 for the full pluggable design. Everything is fully interpretable and deterministic. Current results (linear): CIFAR-10 76.84%, CIFAR-100 55.8%. Target: ImageNet-1K 50%+.
+
+---
+
+## Validated Empirical Findings (the evidence base for v3.3's design choices)
+
+A collaborator applied this exact method to a **bone-fracture X-ray classification** task (10 classes, authoritative dataset, fracture and normal images drawn from the **same distribution/source** — so device/source shortcut is ruled out) and observed:
+
+- **Linear classifier: 72% test accuracy. HistGB classifier: 95% test accuracy.** A +23-point jump on identical symbolic features.
+- **Conclusion (well-supported): the symbolic features encode genuinely discriminative information *non-linearly*.** Linear reads only part of it (72%); a neuron-free non-linear classifier (HistGB) unlocks the rest (95%). This is real signal, not a shortcut (same-source data rules out device fingerprinting; `I_BONE`/`I_EDGE_PRIOR` are deterministic filters, not external models).
+- **Top single formulas were weak (univariate acc 0.34–0.40); 95% comes from the *combination*.** This validates the "many weak symbolic learners + strong neuron-free ensemble" paradigm.
+- **Feature importance was dominated by high-order statistics** (`.range`, `.std`, `.median`, `.skew`, `.q90`, `.q10`, `.kurtosis`) applied to formula feature-maps — the same formula under different statistical pooling (e.g. `formula[619].range`, `.std`, `.median`) all ranked in the top-7. This directly validates the Section 1A.2 statistical operators and the "one formula × many statistical pools" default (Section 1A.6).
+
+These findings drive several v3.3 design decisions, flagged inline as **[Evidence: fracture study]**:
+1. The line that "symbolic features are linearly separable" is **wrong** — they are non-linearly encoded; HistGB is primary, linear is the interpretability reference (Sections 6, methodology).
+2. Pareto anti-bloat must be **classifier-dependent**: long formulas may encode useful non-linear structure under HistGB, so the length penalty is strict under linear but relaxed under HistGB (Section 2).
+3. Feature selection / bank admission must use **MI (non-linear), not linear accuracy** — weak-linear formulas (0.34–0.40) are valuable in combination (Sections 6B, 7).
+4. **Deterministic pre-computed prior terminals** (like the collaborator's `I_EDGE_PRIOR`) shorten formulas and help (Section 1A.0).
+5. **One formula × many statistical pools** as a default expansion (Section 1A.6).
+6. Interpretability's real value is **trust-verification** (occlusion / cross-source / probe tests), not pretty formulas — light decided the fracture result's validity, not formula readability (Section 8).
 
 ---
 
@@ -50,9 +69,39 @@ Terminal tokens currently: `['I_R', 'I_G', 'I_B', 'I_GRAY']` (in `TensorTokenVoc
 
 ---
 
-## Section 1 — New Operators (semantic + high-order statistical + fuzzy logic)
+## Section 1 — New Operators (deterministic prior terminals + semantic + high-order statistical + fuzzy logic)
 
-**Goal**: Increase the *expressiveness* of single formulas by adding (1A.1) mid-level semantic operators, (1A.2) high-order statistical pooling operators, and (1A.3) fuzzy-logic operators. This is the single highest-leverage change for feature quality (current operators are mostly low-level edges/textures, and current pooling only captures first-order moments). The statistical pooling operators are especially synergistic with the HistGB classifier (Section 6): a distribution statistic like skewness or entropy gives HistGB exactly the kind of threshold-able signal it splits on (e.g. `if pool_skewness > 0.3 → bright-background scene`).
+**Goal**: Increase the *expressiveness* of single formulas by adding (1A.0) deterministic pre-computed prior terminals, (1A.1) mid-level semantic operators, (1A.2) high-order statistical pooling operators, (1A.3) asymmetry/spatial-localization pooling, (1A.4) directional line operators, (1A.5) fuzzy-logic operators, and (1A.6) a one-formula-many-pools default. This is the single highest-leverage change for feature quality (current operators are mostly low-level edges/textures, and current pooling only captures first-order moments). The statistical pooling operators are especially synergistic with the HistGB classifier (Section 6): a distribution statistic like skewness or entropy gives HistGB exactly the kind of threshold-able signal it splits on (e.g. `if pool_skewness > 0.3 → bright-background scene`).
+
+### 1A.0. Deterministic pre-computed prior terminals — **[Evidence: fracture study]**
+
+**Motivation**: The fracture study's most-used input channel was `I_EDGE_PRIOR` = "pre-computed gradient magnitude" (it appeared in ~half of the top-20 formulas and top feature-importance list). A prior terminal is a **new leaf/input** for the RPN grammar — a feature map computed once by a fixed deterministic transform, added alongside `I_R/I_G/I_B/I_GRAY`. Benefits: (1) **shorter formulas** — the agent starts from "edge map" instead of re-deriving `... edge_mag ...` every time; (2) **frees RL budget** for higher-level composition instead of re-discovering that edges matter.
+
+**CRITICAL constraint — these MUST be deterministic transforms, NOT learned/external models.** `I_EDGE_PRIOR` is just Sobel/gradient magnitude — a fixed formula, no training, no external weights. This keeps Hard Constraint #5 (no external pretrained knowledge) intact. A terminal computed by a pretrained network would violate the whole interpretability premise and is forbidden.
+
+Add these terminals (computed once per image, cached as input channels, FP32):
+
+```python
+# In the terminal/channel construction (TensorTokenVocabulary / data pipeline).
+# Each is a DETERMINISTIC transform of the grayscale (or per-channel) image — no learning.
+def make_prior_terminals(img_gray):   # img_gray: [B, H, W]
+    # I_EDGE: gradient magnitude (Sobel) — pre-computed edge prior (the collaborator's I_EDGE_PRIOR)
+    gx = TensorOperators.edge_x(img_gray)
+    gy = TensorOperators.edge_y(img_gray)
+    I_EDGE = torch.sqrt(gx*gx + gy*gy + 1e-8)
+
+    # I_FREQ: high-frequency residual = image - blurred (detail/texture prior), deterministic
+    blurred = F.avg_pool2d(img_gray.unsqueeze(1), 5, 1, 2).squeeze(1)
+    I_FREQ = img_gray - blurred
+
+    # I_LAPLACIAN (optional): second-derivative edge prior, deterministic
+    I_LAPLACIAN = TensorOperators.laplacian(img_gray)   # if available; else 4-neighbor laplacian
+    return {'I_EDGE': I_EDGE, 'I_FREQ': I_FREQ, 'I_LAPLACIAN': I_LAPLACIAN}
+```
+
+Register `I_EDGE`, `I_FREQ` (and optionally `I_LAPLACIAN`) as **terminal tokens** in `TensorTokenVocabulary` (the same place `I_R/I_G/I_B/I_GRAY` are defined), so the RL grammar can start formulas from them. They behave exactly like existing terminals (leaf nodes, output a 2D map). Make them **toggleable in config** (`prior_terminals: [I_EDGE, I_FREQ]`) so their contribution can be ablated.
+
+> Note: this is a lightweight cousin of the Layer-2 idea (Section 4) — Layer-2 promotes *discovered* formulas to terminals; 1A.0 promotes *known deterministic transforms* to terminals. Both shorten formulas by providing higher-level starting points.
 
 ### 1A.1. Mid-level semantic operators (HIGH PRIORITY)
 
@@ -252,7 +301,104 @@ def pool_autocorr_lag1(x):
 
 **Do NOT add** (deliberately excluded to avoid bloat / output-type problems): raw histograms (multi-dim output — violates scalar-output contract; their discriminative power is already captured indirectly by entropy + skewness + kurtosis + quantiles), Fourier spectra (overlaps Gabor, poor human readability), Hu moments (strong invariance not needed for ImageNet; low priority).
 
-### 1A.3. Fuzzy-logic operators (MEDIUM PRIORITY)
+### 1A.3. Asymmetry + spatial-localization pooling operators (RECOMMENDED) — **[Evidence: fracture study]**
+
+The fracture study's operator set included `lr_asymmetry` (left-right asymmetry → unilateral fractures) and fine-grained spatial pools (`pool_quad_tr`, `pool_thirds_mid`, `pool_surround`, `peak_location_y`). These are **general-purpose** (not domain-specific) and worth adding: asymmetry is a strong signal across tasks (faces/cars/animals are often symmetric; symmetry *breaks* flag anomalies), and spatial-localization pools let a formula express **where** a feature is, not just how much.
+
+**Important — add only general operators, not the collaborator's domain-specific ones.** Do NOT port `cortical_cont`, `discont_map`, `bone_enhance`, `displace_ind`, `threshold_bone` — those are fracture-specific and meaningless for CIFAR/ImageNet. (Note the irony observed in the study: the *most* important formulas leaned on general texture/direction operators like `lbp_like`, `local_range`, `gabor`, `line`, not the hand-designed pathology operators — general composable operators outperform narrow ones because RL can compose specialized effects from them.)
+
+**Asymmetry pooling ops (SCALAR output → ROOT ops):**
+```python
+@staticmethod
+def pool_lr_asymmetry(x):
+    """Mean absolute left-right difference: |x - fliplr(x)| pooled.
+    high = left/right halves differ (unilateral structure); low = symmetric."""
+    flipped = torch.flip(x, dims=[-1])
+    return torch.abs(x - flipped).mean(dim=(-2, -1))
+
+@staticmethod
+def pool_tb_asymmetry(x):
+    """Mean absolute top-bottom difference: |x - flipud(x)| pooled."""
+    flipped = torch.flip(x, dims=[-2])
+    return torch.abs(x - flipped).mean(dim=(-2, -1))
+```
+
+**Spatial-localization pooling ops (SCALAR output → ROOT ops):**
+```python
+@staticmethod
+def pool_surround(x):
+    """Mean of the border region minus mean of the central region.
+    high = energy concentrated at edges/periphery; low = centered."""
+    B, H, W = x.shape
+    cy0, cy1 = H // 4, 3 * H // 4
+    cx0, cx1 = W // 4, 3 * W // 4
+    center = x[:, cy0:cy1, cx0:cx1].mean(dim=(-2, -1))
+    total  = x.mean(dim=(-2, -1))
+    # surround mean ≈ (total*area - center*area_c)/(area - area_c); use simple proxy:
+    return total - center      # >0 when periphery brighter than center
+
+@staticmethod
+def pool_quadrant_tr(x):
+    """Mean of the top-right quadrant (example fine-grained spatial pool).
+    Add the other three quadrants analogously (tl, bl, br) if useful."""
+    B, H, W = x.shape
+    return x[:, :H // 2, W // 2:].mean(dim=(-2, -1))
+
+@staticmethod
+def pool_thirds_mid(x):
+    """Mean of the central horizontal third (band) of the image."""
+    B, H, W = x.shape
+    return x[:, H // 3: 2 * H // 3, :].mean(dim=(-2, -1))
+
+@staticmethod
+def peak_location_y(x):
+    """Normalized vertical position (0=top,1=bottom) of the max-response pixel.
+    Returns *where* the strongest response is, not its magnitude — a positional feature."""
+    B, H, W = x.shape
+    flat_idx = x.reshape(B, -1).argmax(dim=1)
+    row = (flat_idx // W).float() / max(H - 1, 1)
+    return row
+
+@staticmethod
+def peak_location_x(x):
+    """Normalized horizontal position (0=left,1=right) of the max-response pixel."""
+    B, H, W = x.shape
+    flat_idx = x.reshape(B, -1).argmax(dim=1)
+    col = (flat_idx % W).float() / max(W - 1, 1)
+    return col
+```
+
+### 1A.4. Directional line/edge operators (OPTIONAL) — **[Evidence: fracture study]**
+
+The study used explicit multi-orientation detectors (`line_h`, `line_v`, `line_45`, `line_135`, `edge_diag_45`, `edge_diag_135`) that gave finer orientation selectivity than a single `gabor_mag`. Add a small oriented-line family (unary, tensor output) if the CIFAR ablation shows orientation matters; otherwise defer.
+
+```python
+@staticmethod
+def line_h(x):
+    """Horizontal line/ridge response (second derivative across rows)."""
+    k = torch.tensor([[-1.,-1.,-1.],[2.,2.,2.],[-1.,-1.,-1.]], device=x.device).view(1,1,3,3)
+    return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+@staticmethod
+def line_v(x):
+    """Vertical line/ridge response."""
+    k = torch.tensor([[-1.,2.,-1.],[-1.,2.,-1.],[-1.,2.,-1.]], device=x.device).view(1,1,3,3)
+    return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+@staticmethod
+def line_diag45(x):
+    """45° diagonal line/ridge response."""
+    k = torch.tensor([[-1.,-1.,2.],[-1.,2.,-1.],[2.,-1.,-1.]], device=x.device).view(1,1,3,3)
+    return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+
+@staticmethod
+def line_diag135(x):
+    """135° diagonal line/ridge response."""
+    k = torch.tensor([[2.,-1.,-1.],[-1.,2.,-1.],[-1.,-1.,2.]], device=x.device).view(1,1,3,3)
+    return F.conv2d(x.unsqueeze(1), k, padding=1).squeeze(1)
+```
+
+### 1A.5. Fuzzy-logic operators (MEDIUM PRIORITY)
 
 Add fuzzy operators. **Use the product/probabilistic form, not min/max**, because product forms are differentiable everywhere (needed for the optional end-to-end kernel fine-tuning) and avoid sparse-gradient issues. Inputs are squashed to [0,1] via sigmoid first so the fuzzy semantics ("degree of truth") are meaningful.
 
@@ -276,7 +422,18 @@ def fuzzy_or(x, y):
     return sx + sy - sx * sy
 ```
 
-### 1A.4. Register the new operators
+### 1A.6. Default expansion: one formula × many statistical pools — **[Evidence: fracture study]**
+
+In the fracture study, the *same* formula feature-map appeared multiple times in the top feature-importance list under *different* statistical pools (`formula[619].range`, `.std`, `.median` all in top-7). The different statistics carry **non-redundant** information (range = dynamic span, std = dispersion, median = typical value), and the classifier (HistGB) picks whichever it needs.
+
+**Make this a default, automatic expansion** — independent of, and complementary to, the RL-selected pooling token (1A.2):
+
+- When a formula body (the pre-final-pool feature map) enters the bank, **automatically compute a fixed battery of statistical pools** over it: `{mean, std, range, median, q10, q90, iqr, skewness, kurtosis, l1_norm, l2_norm, max, min, above_mean_ratio}`. Each produces one scalar feature; one formula thus yields ~14 features.
+- This does **not** consume RL search budget (the RL agent still picks one pooling token per formula as before; this battery is applied *post-hoc* to the body, cheaply, for all bank formulas).
+- Implement as a deterministic function `expand_formula_statistics(feature_map) -> dict[str, scalar]`, applied during feature extraction (Section 4D) before the classifier. Feature names follow the study's convention `formula[i].<stat>` so they remain fully traceable.
+- The downstream MI selection (Section 6B) and bank reshuffle (Section 7) operate on this expanded feature set, so useless statistics are pruned automatically — keep admission wide, let selection/HistGB decide which stats matter.
+
+### 1A.7. Register the new operators
 
 In `tensor_operators.py`, add entries to `TENSOR_OPERATORS`:
 
@@ -288,6 +445,12 @@ In `tensor_operators.py`, add entries to `TENSOR_OPERATORS`:
 'contour':        (TensorOperators.contour, 1, 'tensor'),
 'elongation':     (TensorOperators.elongation, 1, 'tensor'),
 'radial_gradient':(TensorOperators.radial_gradient, 1, 'tensor'),
+
+# --- v3.3 directional line operators (1A.4, unary tensor; OPTIONAL) ---
+'line_h':       (TensorOperators.line_h, 1, 'tensor'),
+'line_v':       (TensorOperators.line_v, 1, 'tensor'),
+'line_diag45':  (TensorOperators.line_diag45, 1, 'tensor'),
+'line_diag135': (TensorOperators.line_diag135, 1, 'tensor'),
 
 # --- v3.3 high-order statistical pooling (unary, SCALAR output → ROOT ops) ---
 # Tier 1 (must add)
@@ -305,40 +468,54 @@ In `tensor_operators.py`, add entries to `TENSOR_OPERATORS`:
 'pool_neighbor_diff_var':(TensorOperators.pool_neighbor_diff_var, 1, 'scalar'),
 'pool_autocorr_lag1':   (TensorOperators.pool_autocorr_lag1, 1, 'scalar'),
 
+# --- v3.3 asymmetry + spatial-localization pooling (1A.3, SCALAR → ROOT ops) ---
+'pool_lr_asymmetry': (TensorOperators.pool_lr_asymmetry, 1, 'scalar'),
+'pool_tb_asymmetry': (TensorOperators.pool_tb_asymmetry, 1, 'scalar'),
+'pool_surround':     (TensorOperators.pool_surround, 1, 'scalar'),
+'pool_quadrant_tr':  (TensorOperators.pool_quadrant_tr, 1, 'scalar'),
+'pool_thirds_mid':   (TensorOperators.pool_thirds_mid, 1, 'scalar'),
+'peak_location_y':   (TensorOperators.peak_location_y, 1, 'scalar'),
+'peak_location_x':   (TensorOperators.peak_location_x, 1, 'scalar'),
+
 # --- v3.3 fuzzy logic (tensor output) ---
 'fuzzy_not': (TensorOperators.fuzzy_not, 1, 'tensor'),
 'fuzzy_and': (TensorOperators.fuzzy_and, 2, 'tensor'),
 'fuzzy_or':  (TensorOperators.fuzzy_or, 2, 'tensor'),
 ```
 
-**Add the statistical pooling ops to `ROOT_OPERATORS`** (they output scalars and may appear only as the final token):
+**Add ALL scalar-output ops to `ROOT_OPERATORS`** (statistical + asymmetry + spatial-localization — they output scalars and may appear only as the final token):
 
 ```python
 ROOT_OPERATORS |= {
+    # statistical (1A.2)
     'pool_skewness', 'pool_kurtosis', 'pool_q10', 'pool_q90', 'pool_iqr',
     'pool_above_mean_ratio', 'pool_entropy', 'pool_energy', 'pool_uniformity',
     'pool_neighbor_diff_var', 'pool_autocorr_lag1',
+    # asymmetry + spatial localization (1A.3)
+    'pool_lr_asymmetry', 'pool_tb_asymmetry', 'pool_surround',
+    'pool_quadrant_tr', 'pool_thirds_mid', 'peak_location_y', 'peak_location_x',
 }
 ```
 
 `fuzzy_and`/`fuzzy_or` are binary and must be wrapped with the existing `_safe_binary` decorator/size-matching path, exactly like `add`/`subtract`.
 
-The semantic operators (1A.1) and fuzzy operators (1A.3) are **not** pooling ops → do **not** add them to `ROOT_OPERATORS`. The statistical pooling ops (1A.2) **are** pooling ops → they **must** be in `ROOT_OPERATORS`.
+Tensor-output ops (semantic 1A.1, directional 1A.4, fuzzy 1A.5) are **not** pooling ops → do **not** add to `ROOT_OPERATORS`. All scalar-output ops (statistical 1A.2, asymmetry/spatial 1A.3) **are** pooling ops → they **must** be in `ROOT_OPERATORS`.
 
 ### Acceptance criteria — Section 1
-- [ ] All new operators importable; `TENSOR_OPERATORS` length increased by exactly 20 (6 semantic + 11 statistical pooling + 3 fuzzy). If Tier 3 statistical ops are deferred, increase is 18.
-- [ ] `ROOT_OPERATORS` gains the 11 (or 9 without Tier 3) statistical pooling ops; the 6 semantic and 3 fuzzy ops are **not** in `ROOT_OPERATORS`.
-- [ ] Unit test: each semantic/fuzzy unary op maps `[4, 32, 32]` → `[4, 32, 32]`; each statistical pooling op maps `[4, 32, 32]` → `[4]`; no NaN/Inf; FP32 in/out.
+- [ ] All new operators importable. With everything added: `TENSOR_OPERATORS` grows by 33 (6 semantic + 4 directional + 11 statistical + 7 asymmetry/spatial + 3 fuzzy + 2 extra statistical pools already counted). Deferring optional tiers (1A.4 directional, Tier-3 statistical) reduces this; log the exact count.
+- [ ] `ROOT_OPERATORS` gains all scalar-output ops (11 statistical + 7 asymmetry/spatial = 18, fewer if Tier-3 deferred); no tensor-output op is in `ROOT_OPERATORS`.
+- [ ] Unit test: each tensor-output unary op maps `[4, 32, 32]` → `[4, 32, 32]`; each scalar-output pooling op maps `[4, 32, 32]` → `[4]`; `peak_location_*` returns values in [0,1]; no NaN/Inf; FP32 in/out.
 - [ ] Binary fuzzy ops handle mismatched spatial sizes via `_safe_binary`.
-- [ ] Grammar check: a statistical pooling op is accepted **only** as the final token (action mask treats it like existing pooling ops); rejected mid-formula.
-- [ ] Formula strings `"I_R blob_detector pool_center"` and `"I_R edge_x pool_skewness"` execute end-to-end through `TensorProgramEvaluator.execute_formula`.
+- [ ] Grammar check: every scalar-output op is accepted **only** as the final token; rejected mid-formula.
+- [ ] `expand_formula_statistics(feature_map)` (1A.6) returns the ~14-stat battery as named scalars `formula[i].<stat>`; deterministic; used in Section 4D feature extraction.
+- [ ] Formula strings `"I_R blob_detector pool_center"`, `"I_R edge_x pool_skewness"`, `"I_R pool_lr_asymmetry"`, `"I_R edge_y peak_location_y"` execute end-to-end through `TensorProgramEvaluator.execute_formula`.
 - [ ] Existing Layer-1 PPO run still launches without errors (backward compatible).
 
 ---
 
 ## Section 2 — GRPO with Pareto Group-Relative Advantage
 
-**Goal**: Replace PPO's critic-based advantage with **Group Relative Policy Optimization (GRPO)**, and make the group-relative ranking **Pareto-based** over `(accuracy↑, length↓, depth↓)` to prevent formula bloat. This removes the critic (which is hard to train on the discontinuous symbolic reward landscape) and explicitly biases toward short, shallow, elegant formulas.
+**Goal**: Replace PPO's critic-based advantage with **Group Relative Policy Optimization (GRPO)**, and make the group-relative ranking **Pareto-based** over `(accuracy↑, length↓, depth↓)` to control formula bloat. This removes the critic (which is hard to train on the discontinuous symbolic reward landscape) and biases toward short, shallow formulas. **Critical caveat — the length penalty must be classifier-dependent (see 2E): [Evidence: fracture study] showed symbolic features encode useful *non-linear* structure, so long formulas are not always bloat under a non-linear classifier (HistGB).**
 
 ### 2A. New module: `grpo_trainer.py`
 
@@ -372,10 +549,11 @@ Create `grpo_trainer.py` modeled on `ppo_trainer.py` but with these differences:
    ```
    Keep `clip_epsilon` (0.2), `entropy_coef` (reuse existing schedule), `max_grad_norm` (0.5) from config.
 
-7. **Parsimony tie-break (the user's "强行卡死" rule).** Within a single Pareto front (same rank), if two formulas have `accuracy` within `acc_tol = 0.003` of each other, the shorter/shallower one must receive strictly higher `raw_score`. Implement by adding a small lexicographic nudge after crowding:
+7. **Parsimony tie-break (the user's "强行卡死" rule), with a classifier-dependent strength `λ_len` (see 2E).** Within a single Pareto front (same rank), if two formulas have `accuracy` within `acc_tol = 0.003` of each other, the shorter/shallower one receives a higher `raw_score`. Implement as a configurable lexicographic nudge:
    ```python
-   raw_score -= 1e-3 * length + 1e-3 * depth
+   raw_score -= lambda_len * length + lambda_len * depth   # lambda_len from config (2E)
    ```
+   Under a **linear** classifier set `λ_len` strict (e.g. 1e-3); under **HistGB** relax it (e.g. 2e-4 or 0) so useful long non-linear formulas survive.
 
 ### 2B. Depth computation
 
@@ -391,18 +569,38 @@ grpo:
   acc_tol: 0.003              # accuracy tolerance for parsimony tie-break
   pareto_objectives: [accuracy, length, depth]
   crowding_weight: 0.1
+  lambda_len: 1.0e-3          # parsimony strength; SET BY CLASSIFIER (see 2E):
+                              #   linear → 1e-3 (strict anti-bloat)
+                              #   histgb → 2e-4 or 0 (relaxed; keep useful long non-linear formulas)
 ```
 In `train_tensor_vsr_large_bank.py`, branch on `search_algorithm`: if `grpo`, instantiate `GRPOTrainer`; else keep `PPOTrainer`. **Both must remain runnable.**
 
 ### 2D. Why GRPO + Pareto (record in code comments)
 - GRPO drops the critic, which on symbolic search has a near-impossible job (it must predict the value of half-finished, non-executable formulas in a highly discontinuous reward landscape). Group-relative ranking sidesteps this.
-- Pareto dominance over (accuracy, length, depth) prevents **bloat** without a hand-tuned weight λ: a 51%-accuracy / length-50 formula does NOT dominate a 50%-accuracy / length-10 formula, so the search cannot trade length for tiny accuracy gains.
+- Pareto dominance over (accuracy, length, depth) controls **bloat** without a hand-tuned weight λ in the *dominance* test: a 51%-accuracy / length-50 formula does NOT dominate a 50%-accuracy / length-10 formula. The only tunable knob is the **tie-break** strength `λ_len` (2E).
+
+### 2E. Classifier-dependent length penalty — **[Evidence: fracture study]**
+
+**The correction**: our earlier assumption was "long formulas are bloat; shortening them won't hurt accuracy." The fracture study refutes this *for non-linear classifiers*. There, symbolic features encoded discriminative information **non-linearly** (linear 72% → HistGB 95%), and the top formulas were long (15–18 tokens). A long formula like `if A and B but not C` has low *linear* univariate accuracy yet provides a valuable non-linear building block that HistGB exploits. Aggressively shortening such formulas would discard real signal.
+
+**Therefore the length penalty `λ_len` must depend on the downstream classifier:**
+
+| Downstream classifier | `λ_len` | Rationale |
+|---|---|---|
+| **Linear** (additive) | strict, e.g. `1e-3` | A linear model can only sum features; long formulas that merely stack terms ARE redundant (the classifier could replicate them), so anti-bloat is free and improves readability. |
+| **HistGB** (non-linear, primary) | relaxed, e.g. `2e-4` or `0` | Long formulas may encode non-linear structure the classifier genuinely uses; over-penalizing length would cost accuracy. Keep a *mild* penalty only to break exact ties and curb runaway length. |
+
+**Wiring**: `λ_len` is read from `grpo.lambda_len`, and the orchestrator (Section 5) sets it from `classifier.type` (linear → strict, histgb → relaxed). Hard length/depth caps from the grammar (`max_seq_len`) still apply in both cases as a safety ceiling — relaxing `λ_len` loosens the *soft* preference, not the *hard* limit.
+
+**Required ablation** (CIFAR-10, record in report): for HistGB, compare final accuracy under strict vs relaxed `λ_len`. If relaxed wins, it confirms long formulas carry non-linear signal under HistGB; if strict wins or ties, shorter formulas suffice and we keep them for interpretability. This ablation directly tests the fracture-study hypothesis on our own data.
 
 ### Acceptance criteria — Section 2
 - [ ] `grpo_trainer.py` exists; `GRPOTrainer` has the same outward interface as `PPOTrainer` (so the entrypoint can swap them).
 - [ ] `fast_non_dominated_sort` unit-tested on a toy set of 5 (acc, len, depth) triples with a hand-checked expected ranking.
 - [ ] Depth function unit-tested: `"I_R edge_x pool_center"` → depth 3; `"I_R I_G add pool_center"` → depth 3; nested cases correct.
-- [ ] A short GRPO run (e.g. 50 groups) on CIFAR-10 completes, produces formulas, and the mean formula length does **not** grow monotonically across iterations (bloat check).
+- [ ] `λ_len` is read from config and set by classifier type (linear→strict, histgb→relaxed); both settings run.
+- [ ] A short GRPO run (e.g. 50 groups) on CIFAR-10 completes, produces formulas; under strict `λ_len` mean formula length does **not** grow monotonically (bloat check); under relaxed `λ_len` longer formulas are permitted.
+- [ ] The `λ_len` strict-vs-relaxed accuracy ablation (HistGB, CIFAR-10) is run and logged.
 - [ ] `search_algorithm: ppo` still works unchanged.
 
 ---
@@ -523,18 +721,19 @@ Constrained form (keeps search tiny and bloat-free):
 
 Implement a top-level script `run_v3_3.py` (or extend `train_tensor_vsr_large_bank.py`) that executes:
 
-1. **(Section 1)** Load extended operator registry (semantic + statistical + fuzzy). Sanity-test all new operators.
+1. **(Section 1)** Load extended operator registry (prior terminals 1A.0 + semantic + statistical + asymmetry/spatial + directional + fuzzy) and apply the one-formula-many-pools default (1A.6). Sanity-test all new operators and terminals.
 2. **CIFAR-10 validation of the whole stack first** (cheap, fast, decisive):
-   a. GRPO Layer-1 search (Section 2) **with Section 7 statistical gating** (wide admission + periodic reshuffle) → Layer-1 bodies.
+   a. GRPO Layer-1 search (Section 2, classifier-dependent `λ_len`) **with Section 7 statistical gating** (wide admission + periodic reshuffle) → Layer-1 bodies.
    b. Select top-30 (Section 4A), cache maps (4B), enumerate Layer-2 (4C).
    c. Train the classifier(s) on Layer-1+Layer-2 features. **Run the Section 6 classifier comparison here** (linear / EBM / HistGB / large-GBDT reference). Log accuracy + mean formula length/depth over iterations (bloat check).
-   d. **Gate**: report CIFAR-10 (i) Layer-1 only, (ii) +Layer-2, (iii) +semantic operators ablation, (iv) +statistical operators ablation (1A.2 × HistGB synergy), (v) classifier comparison (Section 6), (vi) admission-gate ablation (legacy `min_acc` vs Section 7 wide+reshuffle). Proceed to ImageNet only if the stack is healthy.
+   d. **Run Section 8 interpretability tools** on the resulting features: probe images for the top formulas, formula→text translation, and (if applicable) occlusion test. Record the level-2/level-5 metrics.
+   e. **Gate**: report CIFAR-10 (i) Layer-1 only, (ii) +Layer-2, (iii) +semantic operators, (iv) +statistical operators (1A.2 × HistGB synergy), (v) +prior terminals (1A.0) ablation, (vi) classifier comparison (Section 6), (vii) strict-vs-relaxed `λ_len` (Section 2E), (viii) admission-gate ablation (legacy `min_acc` vs Section 7 wide+reshuffle). Proceed to ImageNet only if the stack is healthy.
 3. **(Section 3)** ImageNet: build WordNet superclasses; for each superclass run GRPO Layer-1 (with Section 7 gating) + Layer-2 enumeration on its image subset; train **coarse classifier (default: linear) + fine classifiers (default: HistGB + MI + balanced)**; soft-cascade evaluate. If Section 6's CIFAR-10 comparison shows a different best classifier, swap accordingly.
-4. **Final report** `v3_3_report.md` with: per-section ablations, classifier comparison table, statistical-operator and gating ablations, total formula counts, bank rejection/pruning counts by category (Section 7), CIFAR-10/100 and ImageNet top-1, mean formula length/depth (bloat metric), wall-clock per stage, and example discovered formulas with their plain-English reading.
+4. **Final report** `v3_3_report.md` with: per-section ablations, classifier comparison table, statistical-operator / prior-terminal / gating / `λ_len` ablations, total formula counts, bank rejection/pruning counts by category (Section 7), the five-level interpretability self-assessment + quantitative interpretability metrics (Section 8.4), CIFAR-10/100 and ImageNet top-1, mean formula length/depth (bloat metric), wall-clock per stage, and example discovered formulas with their plain-English reading and probe images.
 
 ### Global acceptance criteria
 - [ ] End-to-end CIFAR-10 run reproduces ≥ current 76.84% with Layer-1 only + linear classifier (no regression from adding the new code paths), and reports the Layer-2 / semantic-operator / classifier deltas.
-- [ ] All seven sections individually unit-tested as specced above.
+- [ ] All eight sections individually unit-tested as specced above.
 - [ ] `ppo` and flat (`hierarchical.enabled: false`) paths still run — nothing is removed, only added.
 - [ ] No constraint from the "Hard Constraints" list is violated (spot-check: classifier is neuron-free and within Section 6's interpretability budget, FP32 compute, no external pretrained models, fuzzy ops differentiable, grammar rules intact).
 
@@ -601,7 +800,7 @@ Backends:
 
 The collaborator selects features with `SelectKBest(mutual_info_classif, k=K)`. Match the selector to the downstream classifier:
 
-- **GBDT/EBM (nonlinear) → MI.** Mutual information captures *any* dependency (including nonlinear/non-monotonic), so it keeps features a tree can exploit even when their *linear* weight is ~0. Using L1 here would discard exactly those nonlinear-but-useful features (L1 judges features through a linear model).
+- **GBDT/EBM (nonlinear) → MI.** Mutual information captures *any* dependency (including nonlinear/non-monotonic), so it keeps features a tree can exploit even when their *linear* weight is ~0. Using L1 here would discard exactly those nonlinear-but-useful features (L1 judges features through a linear model). **[Evidence: fracture study]** — there the top single formulas had univariate *linear* accuracy of only 0.34–0.40, yet combined under HistGB they reached 95%. Selecting by linear accuracy would have under-ranked exactly the formulas that carry the non-linear signal; MI ranks them correctly. This is concrete proof that bank admission and feature selection must use MI, not linear accuracy, whenever the downstream classifier is non-linear.
 - **Linear → L1.** Same family as the classifier; keeps linearly-separating features and auto-removes redundancy.
 
 **Two-stage selection (recommended for our redundant formula bank).** MI's weakness is that it scores each feature independently and does **not** remove redundancy — given 100 near-duplicate formulas it keeps them all. Our bank is highly correlated (corr 0.6–0.9). So:
@@ -846,14 +1045,76 @@ bank_reshuffle:
 
 ---
 
+## Section 8 — Interpretability: Definition, Measurement, and Trust-Verification — **[Evidence: fracture study]**
+
+**Goal**: Stop treating "interpretability" as a vague binary claim and make it a *defined, measured, enhanced* property. The fracture study made the core lesson concrete: a top formula like `I_r local_range I_BONE multiply I_NEG multiply lbp_like flip_h I_NEG multiply normalize` is **fully traceable but not human-readable** — and crucially, *reading the formula could not tell us whether the 95% was real signal or a shortcut*. What settled it was **same-source data provenance** (and, ideally, an occlusion test) — not formula readability. This reframes where our interpretability value actually lives.
+
+### 8.0 The traceable-vs-understandable distinction (state this explicitly in the paper)
+
+| | Traceable | Understandable |
+|---|---|---|
+| Meaning | every computation is deterministic and reproducible | a human can see *what it measures and why it helps* |
+| Our status | ✅ 100% (pixels → prediction, all explicit math) | ⚠️ partial (short formulas yes; long ones no) |
+| Neural nets | ❌ | ❌ |
+
+We have **100% traceability**; **understandability is partial**. The selling point must be built on what we actually have, not on "every formula is readable" (which a single 17-token formula refutes).
+
+### 8.1 Five-level interpretability spectrum (locate ourselves honestly)
+
+1. **Mechanistic transparency** — no black box; every value from explicit math. **Us: ~100%** (our true strength).
+2. **Per-unit semantics** — each formula maps to a human-readable visual concept. **Us: ~50%** (short formulas only; the long-formula gap).
+3. **Decision attribution** — for a given prediction, quantify which formulas contributed. **Us: ~85%** (linear exact; HistGB path-level + importance).
+4. **Concept alignment** — features align with expert-recognized concepts. **Us: ~15%** (we deliberately use no external concept knowledge).
+5. **Causal verifiability** — verify the model uses causally-relevant features, not dataset shortcuts. **Us: strong-but-unsystematic; this section makes it systematic.**
+
+**Recalibrated selling point**: build the claim on **levels 1 + 3 + 5** (mechanistic transparency + decision attribution + causal verifiability), where we genuinely dominate black boxes — *not* on level 2 (which long formulas break) or level 4 (which we forgo by design). State level 2/4 limits honestly; reviewers respect a precise interpretability claim far more than a hand-wavy "we are interpretable."
+
+### 8.2 Trust-verification tools (the real value — black boxes cannot do these) — implement these
+
+This is the heart of Section 8: the fracture case proved interpretability's payoff is **verifying whether high accuracy is trustworthy**, which our deterministic features make possible and a CNN does not.
+
+- **8.2a Occlusion test** (`interpretability/occlusion_test.py`): mask the task-relevant region (e.g. via a deterministic foreground mask — for the fracture case, the existing `threshold_bone` operator generates a bone mask) and re-evaluate. If accuracy holds, the signal is in the object; if it collapses, the model was using background/shortcut. Report accuracy-vs-occlusion curve.
+- **8.2b Cross-source test** (`interpretability/cross_source_test.py`): if data has source/site/device metadata, train on one source and test on another. A large drop reveals source-shortcut dependence. (For the fracture study this was implicitly passed via same-source data; make it an explicit, optional harness for any dataset with source labels.)
+- **8.2c Probe images** (`interpretability/probe_images.py`): for any formula — *especially* an unreadable long one — render the top-k and bottom-k activating images from the training set. A human instantly sees what the formula responds to ("ah, it fires on textured bone-cortex breaks"), recovering level-2 understanding for formulas whose token-chain is opaque. This is the single most effective tool for the long-formula problem.
+- **8.2d Deterministic formula→text translation** (`interpretability/formula_to_text.py`): a rule-based (NOT LLM, no external knowledge) translator that maps an RPN token chain to a structured phrase, e.g. `I_R edge_x blur pool_center → "smoothed horizontal-edge strength of the red channel, central region"`. For long formulas it produces nested phrasing — verbose but consistent and traceable. Reuse the channel/operator names already used in the interpretability slides.
+
+### 8.3 Enhancing per-unit semantics (level 2) — link to existing mechanisms
+
+- **Pareto length penalty (Section 2E) IS an interpretability mechanism**, not just anti-overfit: shorter formulas are more readable. State this linkage explicitly. (But respect 2E's classifier-dependent caveat: under HistGB we relax length to keep useful non-linear structure — so probe images (8.2c), not shortness alone, carry level-2 understanding there.)
+- **DAG naming / sub-expression abstraction (future, DreamCoder-style)**: when a sub-chain (e.g. `edge_x blur`) recurs across high-importance formulas, abstract it into a named composite (`smooth_h_edge`), so long formulas read as compositions of a few named mid-level concepts. Note as future work; not required for v3.3.
+
+### 8.4 Quantitative interpretability metrics (report these — make interpretability measurable)
+
+In `v3_3_report.md`, report interpretability as numbers, not adjectives:
+- **mean formula length / depth** (level-2 proxy; lower = more readable);
+- **fraction of delivered features with length ≤ L** (e.g. ≤ 6 tokens) — the "readable fraction";
+- **probe-image consistency**: do the top-k activators of a formula share an obvious visual theme (can be a quick human rating on a sample);
+- **occlusion robustness**: accuracy retained under object-region-only evaluation (level-5 metric);
+- For HistGB: mean decision-path length and number of formulas covering 80% of total importance.
+
+### 8.5 Framing the fracture result in the paper (decided by verification, not readability)
+
+Write the 72%→95% result as a **dual win**: (i) it demonstrates symbolic features encode genuine *non-linear* discriminative signal that a neuron-free classifier unlocks; (ii) it demonstrates that our method's interpretability lets us *verify* that 95% is trustworthy (same-source provenance + occlusion test) — a check a black-box CNN at the same accuracy cannot provide. The headline is not "95%"; it is "95% **that we can audit**."
+
+### Acceptance criteria — Section 8
+- [ ] `occlusion_test.py`, `cross_source_test.py`, `probe_images.py`, `formula_to_text.py` implemented; each runs on CIFAR-10 and (where applicable) the ImageNet/superclass pipeline.
+- [ ] Probe images render top-k/bottom-k activators for an arbitrary formula (including a long, unreadable one) — verify on at least one 12+-token formula.
+- [ ] `formula_to_text.py` is purely rule-based (no LLM, no external data); every channel/operator token has a phrase mapping; nested phrasing for compound formulas.
+- [ ] The five-level self-assessment and the recalibrated (levels 1+3+5) selling point are written into `v3_3_report.md`.
+- [ ] Quantitative interpretability metrics (8.4) computed and reported.
+- [ ] No external pretrained model used anywhere in Section 8 (Hard Constraint #5 preserved).
+
+---
+
 ## Suggested Implementation Order (for Claude Code)
 
-1. **Section 1** (operators: semantic + statistical + fuzzy) — smallest, unblocks everything, immediately testable.
+1. **Section 1** (operators: prior terminals + semantic + statistical + asymmetry/spatial + fuzzy + multi-pool default) — smallest, unblocks everything, immediately testable.
 2. **Section 4** (cache + Layer-2 enumeration) on **CIFAR-10** — validates the feature-map idea cheaply; depends only on existing Layer-1 bodies in `l1_selected_bodies.json`.
 3. **Section 6** (HistGB primary + classifier comparison) on **CIFAR-10** — cheap, runs on existing features; validates HistGB+MI+balanced beats linear at our feature scale (and the 1A.2-statistics × HistGB synergy), exercises the budget sweep before committing the ImageNet fine-stage choice.
 4. **Section 7** (statistical gating + reshuffle) — wire into the search loop; cheap to validate on CIFAR-10 with the ablation (legacy gate vs wide-admission+reshuffle).
-5. **Section 2** (GRPO + Pareto) — swap-in trainer; validate bloat control on CIFAR-10.
-6. **Section 3** (WordNet hierarchy) — mandatory for ImageNet scale when using HistGB (see 6.0); uses the winning classifier from Section 6 for the fine stage (default: HistGB).
-7. **Section 5** (orchestration + report).
+5. **Section 2** (GRPO + Pareto, classifier-dependent length penalty) — swap-in trainer; validate bloat control + the strict-vs-relaxed `λ_len` ablation on CIFAR-10.
+6. **Section 8** (interpretability tools) — probe images / occlusion / formula-to-text run on existing CIFAR-10 features; needed to frame results and verify trust before scaling.
+7. **Section 3** (WordNet hierarchy) — mandatory for ImageNet scale when using HistGB (see 6.0); uses the winning classifier from Section 6 for the fine stage (default: HistGB).
+8. **Section 5** (orchestration + report).
 
 Keep every change behind a config flag so the original PPO / flat / Layer-1-only pipeline remains runnable for comparison. Commit each section separately with its unit tests.

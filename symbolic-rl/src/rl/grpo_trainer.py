@@ -49,6 +49,10 @@ class GRPOTrainer:
         group_size: int = 16,
         acc_tol: float = 0.003,
         crowding_weight: float = 0.1,
+        # Section 2E: classifier-dependent parsimony strength. The orchestrator sets this
+        # from classifier.type — linear → strict (1e-3, anti-bloat is free), histgb →
+        # relaxed (2e-4 or 0, keep useful long non-linear formulas).
+        lambda_len: float = 1.0e-3,
         # Entropy schedule (same semantics as PPOTrainer)
         entropy_coef_start: float = None,
         entropy_coef_end: float = None,
@@ -75,6 +79,7 @@ class GRPOTrainer:
         self.group_size = group_size
         self.acc_tol = acc_tol
         self.crowding_weight = crowding_weight
+        self.lambda_len = lambda_len   # Section 2E: classifier-dependent (see __init__)
 
         # Entropy schedule + LR warmup (mirror PPOTrainer)
         self.entropy_coef_start = entropy_coef_start or entropy_coef
@@ -220,8 +225,9 @@ class GRPOTrainer:
             raw[i] = -float(ranks[i]) + self.crowding_weight * norm_crowd[i]
         # parsimony tie-break: within a front, shorter/shallower gets strictly higher
         # raw_score (also enforces the acc_tol "强行卡死" preference lexicographically).
+        # Strength is classifier-dependent (Section 2E): self.lambda_len.
         for i in range(n):
-            raw[i] -= 1e-3 * length[i] + 1e-3 * depth[i]
+            raw[i] -= self.lambda_len * length[i] + self.lambda_len * depth[i]
 
         adv = (raw - raw.mean()) / (raw.std() + 1e-8)
         return adv, ranks

@@ -50,11 +50,11 @@ Terminal tokens currently: `['I_R', 'I_G', 'I_B', 'I_GRAY']` (in `TensorTokenVoc
 
 ---
 
-## Section 1 — New Semantic Operators (blob / symmetry / contour + fuzzy logic)
+## Section 1 — New Operators (semantic + high-order statistical + fuzzy logic)
 
-**Goal**: Increase the *expressiveness* of single formulas by adding mid-level semantic operators and fuzzy-logic operators. This is the single highest-leverage change for feature quality (current operators are mostly low-level edges/textures).
+**Goal**: Increase the *expressiveness* of single formulas by adding (1A.1) mid-level semantic operators, (1A.2) high-order statistical pooling operators, and (1A.3) fuzzy-logic operators. This is the single highest-leverage change for feature quality (current operators are mostly low-level edges/textures, and current pooling only captures first-order moments). The statistical pooling operators are especially synergistic with the HistGB classifier (Section 6): a distribution statistic like skewness or entropy gives HistGB exactly the kind of threshold-able signal it splits on (e.g. `if pool_skewness > 0.3 → bright-background scene`).
 
-### 1A. Semantic operators (HIGH PRIORITY)
+### 1A.1. Mid-level semantic operators (HIGH PRIORITY)
 
 Add the following `@staticmethod` methods to the `TensorOperators` class in `tensor_operators.py`. All operate on `[B, H, W]` tensors and return `[B, H, W]` (unary, `'tensor'` output) unless noted. All must be FP32 and numerically safe (add `1e-8` under sqrt/div).
 
@@ -137,7 +137,122 @@ def radial_gradient(x):
 
 If `edge_mag`, `dog`, `corner_harris`, `lbp_like`, `local_contrast`, `edge_xx`, `edge_yy`, `gabor_mag` are **not yet present** (they were specced in v3.2), add them too — definitions are in the v3.2 plan; reuse those exact implementations.
 
-### 1B. Fuzzy-logic operators (MEDIUM PRIORITY)
+### 1A.2. High-order statistical pooling operators (HIGH PRIORITY)
+
+**Motivation**: Every existing pooling operator captures only *first-order* moments (mean/max/min/std/L2). Two images with identical mean and std can have completely different distribution *shapes* (normal vs bimodal vs skewed) — current operators cannot tell them apart. Image-class discrimination on ImageNet leans heavily on global intensity/color *distribution shape* and *texture statistics*, which these operators expose directly. They are also the strongest synergy with HistGB (threshold-able distribution statistics → readable split rules).
+
+These are **pooling operators**: they take `[B, H, W]` and return `[B]` (scalar, `'scalar'` output), and they **must be added to `ROOT_OPERATORS`** (they may appear only as the final token, like the existing pooling ops). All FP32, numerically safe.
+
+**Tier 1 — MUST ADD (6 ops): distribution-shape moments + quantiles.** These fill the biggest gap (no shape information beyond first order).
+
+```python
+@staticmethod
+def pool_skewness(x):
+    """3rd standardized moment — distribution asymmetry.
+    e.g. bright-sky scenes (bright pixels dominate) vs night scenes have opposite sign."""
+    flat = x.reshape(x.shape[0], -1)
+    mean = flat.mean(dim=1, keepdim=True)
+    std = flat.std(dim=1, keepdim=True) + 1e-8
+    return (((flat - mean) / std) ** 3).mean(dim=1)
+
+@staticmethod
+def pool_kurtosis(x):
+    """4th standardized moment minus 3 — tail heaviness.
+    sparse strong edges (high) vs uniform texture (low)."""
+    flat = x.reshape(x.shape[0], -1)
+    mean = flat.mean(dim=1, keepdim=True)
+    std = flat.std(dim=1, keepdim=True) + 1e-8
+    return (((flat - mean) / std) ** 4).mean(dim=1) - 3.0
+
+@staticmethod
+def pool_q10(x):
+    """10th percentile — representative dark-region value."""
+    return torch.quantile(x.reshape(x.shape[0], -1), 0.10, dim=1)
+
+@staticmethod
+def pool_q90(x):
+    """90th percentile — representative bright-region value."""
+    return torch.quantile(x.reshape(x.shape[0], -1), 0.90, dim=1)
+
+@staticmethod
+def pool_iqr(x):
+    """Inter-quartile range q75-q25 — robust spread, outlier-resistant vs std."""
+    flat = x.reshape(x.shape[0], -1)
+    return torch.quantile(flat, 0.75, dim=1) - torch.quantile(flat, 0.25, dim=1)
+
+@staticmethod
+def pool_above_mean_ratio(x):
+    """Fraction of pixels above the mean — 'bright-area occupancy'.
+    high for sky/snow scenes, low for dark scenes."""
+    flat = x.reshape(x.shape[0], -1)
+    mean = flat.mean(dim=1, keepdim=True)
+    return (flat > mean).float().mean(dim=1)
+```
+
+**Tier 2 — RECOMMENDED (3 ops): information-theoretic statistics.** Entropy/uniformity are classic texture discriminators (GLCM, Tamura). Use soft (differentiable) histograms.
+
+```python
+@staticmethod
+def pool_entropy(x):
+    """Shannon entropy of a 32-bin soft histogram (per-sample min-max normalized).
+    high = complex texture/diverse content; low = flat/single-color region."""
+    flat = x.reshape(x.shape[0], -1)
+    mn = flat.min(dim=1, keepdim=True).values
+    mx = flat.max(dim=1, keepdim=True).values
+    norm = (flat - mn) / (mx - mn + 1e-8)
+    bins = 32
+    centers = torch.linspace(0, 1, bins, device=x.device).view(1, bins, 1)
+    soft_hist = torch.exp(-100.0 * (norm.unsqueeze(1) - centers) ** 2)   # [B, bins, N]
+    hist = soft_hist.sum(dim=2)
+    hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)
+    return -(hist * torch.log(hist + 1e-8)).sum(dim=1)
+
+@staticmethod
+def pool_energy(x):
+    """Mean squared value — signal energy normalized by area."""
+    return (x ** 2).mean(dim=(-2, -1))
+
+@staticmethod
+def pool_uniformity(x):
+    """Sum of squared histogram probabilities (Σ p_i^2) — inverse of dispersion.
+    high = pixel values concentrated (single color); low = spread out."""
+    flat = x.reshape(x.shape[0], -1)
+    mn = flat.min(dim=1, keepdim=True).values
+    mx = flat.max(dim=1, keepdim=True).values
+    norm = (flat - mn) / (mx - mn + 1e-8)
+    bins = 16
+    centers = torch.linspace(0, 1, bins, device=x.device).view(1, bins, 1)
+    soft_hist = torch.exp(-100.0 * (norm.unsqueeze(1) - centers) ** 2)
+    hist = soft_hist.sum(dim=2)
+    hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)
+    return (hist ** 2).sum(dim=1)
+```
+
+**Tier 3 — OPTIONAL (2 ops): co-occurrence / spatial-correlation statistics.** Simplified GLCM-style texture statistics. Add only if Tier 1+2 prove useful in the CIFAR ablation.
+
+```python
+@staticmethod
+def pool_neighbor_diff_var(x):
+    """Variance of adjacent-pixel differences — local contrast statistic.
+    high = high-frequency texture (fur, fabric), low = flat."""
+    diff_x = x[:, :, 1:] - x[:, :, :-1]
+    diff_y = x[:, 1:, :] - x[:, :-1, :]
+    return diff_x.var(dim=(-2, -1)) + diff_y.var(dim=(-2, -1))
+
+@staticmethod
+def pool_autocorr_lag1(x):
+    """Lag-1 horizontal autocorrelation — spatial smoothness.
+    high = smooth, low = noisy/high-frequency."""
+    fx = x[:, :, 1:].reshape(x.shape[0], -1)
+    fy = x[:, :, :-1].reshape(x.shape[0], -1)
+    mx = fx.mean(dim=1, keepdim=True); my = fy.mean(dim=1, keepdim=True)
+    cov = ((fx - mx) * (fy - my)).mean(dim=1)
+    return cov / (fx.std(dim=1) * fy.std(dim=1) + 1e-8)
+```
+
+**Do NOT add** (deliberately excluded to avoid bloat / output-type problems): raw histograms (multi-dim output — violates scalar-output contract; their discriminative power is already captured indirectly by entropy + skewness + kurtosis + quantiles), Fourier spectra (overlaps Gabor, poor human readability), Hu moments (strong invariance not needed for ImageNet; low priority).
+
+### 1A.3. Fuzzy-logic operators (MEDIUM PRIORITY)
 
 Add fuzzy operators. **Use the product/probabilistic form, not min/max**, because product forms are differentiable everywhere (needed for the optional end-to-end kernel fine-tuning) and avoid sparse-gradient issues. Inputs are squashed to [0,1] via sigmoid first so the fuzzy semantics ("degree of truth") are meaningful.
 
@@ -161,7 +276,7 @@ def fuzzy_or(x, y):
     return sx + sy - sx * sy
 ```
 
-### 1C. Register the new operators
+### 1A.4. Register the new operators
 
 In `tensor_operators.py`, add entries to `TENSOR_OPERATORS`:
 
@@ -174,21 +289,49 @@ In `tensor_operators.py`, add entries to `TENSOR_OPERATORS`:
 'elongation':     (TensorOperators.elongation, 1, 'tensor'),
 'radial_gradient':(TensorOperators.radial_gradient, 1, 'tensor'),
 
-# --- v3.3 fuzzy logic ---
+# --- v3.3 high-order statistical pooling (unary, SCALAR output → ROOT ops) ---
+# Tier 1 (must add)
+'pool_skewness':        (TensorOperators.pool_skewness, 1, 'scalar'),
+'pool_kurtosis':        (TensorOperators.pool_kurtosis, 1, 'scalar'),
+'pool_q10':             (TensorOperators.pool_q10, 1, 'scalar'),
+'pool_q90':             (TensorOperators.pool_q90, 1, 'scalar'),
+'pool_iqr':             (TensorOperators.pool_iqr, 1, 'scalar'),
+'pool_above_mean_ratio':(TensorOperators.pool_above_mean_ratio, 1, 'scalar'),
+# Tier 2 (recommended)
+'pool_entropy':         (TensorOperators.pool_entropy, 1, 'scalar'),
+'pool_energy':          (TensorOperators.pool_energy, 1, 'scalar'),
+'pool_uniformity':      (TensorOperators.pool_uniformity, 1, 'scalar'),
+# Tier 3 (optional — gate on CIFAR ablation)
+'pool_neighbor_diff_var':(TensorOperators.pool_neighbor_diff_var, 1, 'scalar'),
+'pool_autocorr_lag1':   (TensorOperators.pool_autocorr_lag1, 1, 'scalar'),
+
+# --- v3.3 fuzzy logic (tensor output) ---
 'fuzzy_not': (TensorOperators.fuzzy_not, 1, 'tensor'),
 'fuzzy_and': (TensorOperators.fuzzy_and, 2, 'tensor'),
 'fuzzy_or':  (TensorOperators.fuzzy_or, 2, 'tensor'),
 ```
 
+**Add the statistical pooling ops to `ROOT_OPERATORS`** (they output scalars and may appear only as the final token):
+
+```python
+ROOT_OPERATORS |= {
+    'pool_skewness', 'pool_kurtosis', 'pool_q10', 'pool_q90', 'pool_iqr',
+    'pool_above_mean_ratio', 'pool_entropy', 'pool_energy', 'pool_uniformity',
+    'pool_neighbor_diff_var', 'pool_autocorr_lag1',
+}
+```
+
 `fuzzy_and`/`fuzzy_or` are binary and must be wrapped with the existing `_safe_binary` decorator/size-matching path, exactly like `add`/`subtract`.
 
-Do **not** add any of these to `ROOT_OPERATORS` (none are pooling ops).
+The semantic operators (1A.1) and fuzzy operators (1A.3) are **not** pooling ops → do **not** add them to `ROOT_OPERATORS`. The statistical pooling ops (1A.2) **are** pooling ops → they **must** be in `ROOT_OPERATORS`.
 
 ### Acceptance criteria — Section 1
-- [ ] All new operators importable; `TENSOR_OPERATORS` length increased by exactly 9.
-- [ ] Unit test: each unary op maps `[4, 32, 32]` → `[4, 32, 32]`, no NaN/Inf, FP32 in/out.
+- [ ] All new operators importable; `TENSOR_OPERATORS` length increased by exactly 20 (6 semantic + 11 statistical pooling + 3 fuzzy). If Tier 3 statistical ops are deferred, increase is 18.
+- [ ] `ROOT_OPERATORS` gains the 11 (or 9 without Tier 3) statistical pooling ops; the 6 semantic and 3 fuzzy ops are **not** in `ROOT_OPERATORS`.
+- [ ] Unit test: each semantic/fuzzy unary op maps `[4, 32, 32]` → `[4, 32, 32]`; each statistical pooling op maps `[4, 32, 32]` → `[4]`; no NaN/Inf; FP32 in/out.
 - [ ] Binary fuzzy ops handle mismatched spatial sizes via `_safe_binary`.
-- [ ] A formula string like `"I_R blob_detector pool_center"` executes end-to-end through `TensorProgramEvaluator.execute_formula`.
+- [ ] Grammar check: a statistical pooling op is accepted **only** as the final token (action mask treats it like existing pooling ops); rejected mid-formula.
+- [ ] Formula strings `"I_R blob_detector pool_center"` and `"I_R edge_x pool_skewness"` execute end-to-end through `TensorProgramEvaluator.execute_formula`.
 - [ ] Existing Layer-1 PPO run still launches without errors (backward compatible).
 
 ---
@@ -351,7 +494,10 @@ Constrained form (keeps search tiny and bloat-free):
   f_i, f_j ∈ top-30 Layer-1 bodies, i < j   (dedupe symmetric ops)
   BinOp ∈ {subtract, multiply, fuzzy_and, fuzzy_or}     # informative, bounded
   UnaryOps ∈ subsets (size 0–2) of {abs, relu, sigmoid, normalize, blob_detector, contour}
-  Pool ∈ ROOT_OPERATORS  (all existing pooling ops)
+  Pool ∈ ROOT_OPERATORS  (all pooling ops — now including the Section 1A.2 statistical pools:
+                          pool_skewness, pool_entropy, pool_q90, … — so Layer-2 features can
+                          capture the *distribution shape* of cross-formula interactions, not
+                          just their mean)
 ```
 - **Two-stage evaluation** (multi-fidelity):
   - **Stage A (coarse)**: evaluate every candidate on a subsample (CIFAR: 5k; ImageNet/superclass: 20/class) using cached maps → univariate accuracy. Keep top-2000.
@@ -377,18 +523,18 @@ Constrained form (keeps search tiny and bloat-free):
 
 Implement a top-level script `run_v3_3.py` (or extend `train_tensor_vsr_large_bank.py`) that executes:
 
-1. **(Section 1)** Load extended operator registry. Sanity-test all new operators.
+1. **(Section 1)** Load extended operator registry (semantic + statistical + fuzzy). Sanity-test all new operators.
 2. **CIFAR-10 validation of the whole stack first** (cheap, fast, decisive):
-   a. GRPO Layer-1 search (Section 2) → Layer-1 bodies.
+   a. GRPO Layer-1 search (Section 2) **with Section 7 statistical gating** (wide admission + periodic reshuffle) → Layer-1 bodies.
    b. Select top-30 (Section 4A), cache maps (4B), enumerate Layer-2 (4C).
-   c. Train the classifier(s) on Layer-1+Layer-2 features. **Run the Section 6 classifier comparison here** (linear / EBM / shallow GBDT / large-GBDT reference). Log accuracy + mean formula length/depth over iterations (bloat check).
-   d. **Gate**: report CIFAR-10 (i) Layer-1 only, (ii) +Layer-2, (iii) +new semantic operators ablation, (iv) classifier comparison from Section 6. Proceed to ImageNet only if the stack is healthy.
-3. **(Section 3)** ImageNet: build WordNet superclasses; for each superclass run GRPO Layer-1 + Layer-2 enumeration on its image subset; train **coarse classifier (default: linear) + fine classifiers (default: HistGB + MI + balanced)**; soft-cascade evaluate. If Section 6's CIFAR-10 comparison shows a different best classifier, swap accordingly.
-4. **Final report** `v3_3_report.md` with: per-section ablations, classifier comparison table, total formula counts, CIFAR-10/100 and ImageNet top-1, mean formula length/depth (bloat metric), wall-clock per stage, and example discovered formulas with their plain-English reading.
+   c. Train the classifier(s) on Layer-1+Layer-2 features. **Run the Section 6 classifier comparison here** (linear / EBM / HistGB / large-GBDT reference). Log accuracy + mean formula length/depth over iterations (bloat check).
+   d. **Gate**: report CIFAR-10 (i) Layer-1 only, (ii) +Layer-2, (iii) +semantic operators ablation, (iv) +statistical operators ablation (1A.2 × HistGB synergy), (v) classifier comparison (Section 6), (vi) admission-gate ablation (legacy `min_acc` vs Section 7 wide+reshuffle). Proceed to ImageNet only if the stack is healthy.
+3. **(Section 3)** ImageNet: build WordNet superclasses; for each superclass run GRPO Layer-1 (with Section 7 gating) + Layer-2 enumeration on its image subset; train **coarse classifier (default: linear) + fine classifiers (default: HistGB + MI + balanced)**; soft-cascade evaluate. If Section 6's CIFAR-10 comparison shows a different best classifier, swap accordingly.
+4. **Final report** `v3_3_report.md` with: per-section ablations, classifier comparison table, statistical-operator and gating ablations, total formula counts, bank rejection/pruning counts by category (Section 7), CIFAR-10/100 and ImageNet top-1, mean formula length/depth (bloat metric), wall-clock per stage, and example discovered formulas with their plain-English reading.
 
 ### Global acceptance criteria
 - [ ] End-to-end CIFAR-10 run reproduces ≥ current 76.84% with Layer-1 only + linear classifier (no regression from adding the new code paths), and reports the Layer-2 / semantic-operator / classifier deltas.
-- [ ] All six sections individually unit-tested as specced above.
+- [ ] All seven sections individually unit-tested as specced above.
 - [ ] `ppo` and flat (`hierarchical.enabled: false`) paths still run — nothing is removed, only added.
 - [ ] No constraint from the "Hard Constraints" list is violated (spot-check: classifier is neuron-free and within Section 6's interpretability budget, FP32 compute, no external pretrained models, fuzzy ops differentiable, grammar rules intact).
 
@@ -448,6 +594,8 @@ Backends:
 4. **`ReferenceGBDTClassifier` (black-box, reference-only)** — full-strength HistGB/LightGBM (e.g. `max_iter=500, max_depth=8`), **never delivered**, used only to measure the accuracy ceiling. Reported in a separate "upper-bound reference" row, never mixed into interpretable results.
 
 > Dependency note: HistGB is in `sklearn` (already a dependency). `interpret` (EBM) is optional. None contain neural networks → all satisfy "no neurons." If an optional package is missing, skip that backend gracefully with a logged note; do not fail the harness.
+
+> **Synergy with the statistical operators (Section 1A.2)**: HistGB splits on feature thresholds, so the high-order statistical features (skewness, kurtosis, entropy, quantiles) are unusually valuable to it — each gives a directly threshold-able, semantically meaningful signal (e.g. `if pool_entropy > τ → textured-surface class`). Under a linear classifier a single statistic is just one more weighted term; under HistGB it can anchor an entire decision rule. The Section 1A.2 operators and the HistGB classifier are therefore co-designed: expect a larger combined gain than either change alone, and verify this interaction explicitly in the Section 6F comparison (report HistGB accuracy with vs without the 1A.2 statistical features).
 
 ### 6B. Feature selection: MI vs L1, and the two-stage rule
 
@@ -580,13 +728,132 @@ The delivered model must stay neuron-free **and** interpretable. **HistGB + MI +
 
 ---
 
+## Section 7 — Statistical Gating for Bank Admission and Periodic Reshuffle
+
+**Goal**: Use statistics to control which formulas enter the bank and which get pruned — but split the responsibility correctly. The current admission rule is a single test (univariate accuracy > `min_acc=0.002`), which has three blind spots: (1) it admits **degenerate** formulas (near-constant output, NaN/inf, saturated range) that are just noise; (2) it misses **non-linear redundancy** (formulas with low linear correlation but near-identical distributions); (3) it judges discriminative power by **linear** separability, which mis-fits the HistGB endgame (a formula can have low linear accuracy yet strong non-linear MI that HistGB could exploit).
+
+**Core principle — wide admission, strict reshuffle.** Do **not** make admission strict. Strict admission would kill diversity, starve the early bank (when the policy is still weak and most formulas look mediocre), and fight the Pareto/parsimony pressure (short formulas naturally have lower variance/MI). Instead:
+
+- **Admission gate = degeneracy rejection only** (cheap, per-formula, generous). Reject only formulas that are statistically *broken*, never formulas that are merely *weak*. Discriminative-power judgment is deliberately **not** done at admission.
+- **Periodic reshuffle = group-level discriminative + redundancy pruning** (the user's earlier "宽进 + 定期大洗牌 Lasso" idea, now generalized). Every `reshuffle_interval` iterations, evaluate the *whole* bank together and prune what is genuinely useless or redundant. Group evaluation is far more accurate than per-formula admission judgments, because usefulness is contextual (a weak-alone formula can be complementary).
+
+This section unifies three distinct roles statistics play in the pipeline; keep them conceptually separate in the code:
+
+| Role | Where | Statistics used |
+|---|---|---|
+| **As features** | formula pooling ops (Section 1A.2) | skewness, kurtosis, entropy, quantiles … |
+| **As admission gate** | bank entry (7A) | variance, finite-ratio, dynamic-range (degeneracy only) |
+| **As reshuffle criterion** | periodic group pruning (7B) | MI (HistGB-matched), Lasso/HistGB importance, Wasserstein redundancy |
+
+### 7A. Admission gate (degeneracy rejection — wide)
+
+New module `bank_admission.py`. Called when a formula completes, **before** it is added to the bank. Operates on the formula's output vector `v = feature_values [N]` over the current evaluation batch. **Reject only on statistical degeneracy**, with generous thresholds:
+
+```python
+def admission_gate(v, cfg):
+    # 1. finite-ratio: reject formulas producing many NaN/inf
+    finite = torch.isfinite(v).float().mean()
+    if finite < cfg.finite_min:            # e.g. 0.95
+        return False, "nonfinite"
+    v = v[torch.isfinite(v)]
+
+    # 2. variance floor: reject near-constant (no information) outputs
+    if v.var() < cfg.var_min:              # e.g. 1e-5  (generous — only kills true constants)
+        return False, "degenerate_constant"
+
+    # 3. dynamic-range floor: reject saturated/clamped outputs (collapsed by ±60000 clamp etc.)
+    iqr = torch.quantile(v, 0.75) - torch.quantile(v, 0.25)
+    if iqr < cfg.iqr_min:                  # e.g. 1e-4
+        return False, "saturated"
+
+    return True, "admit"
+```
+
+**Deliberately NOT in the admission gate**: any accuracy/MI threshold on discriminative power. Admission keeps the existing very-low `min_acc=0.002` as a floor at most (or drops it entirely in favor of degeneracy-only gating — A/B both in the CIFAR ablation). The point is to stay **wide**: a formula that is statistically healthy but weak still gets in, because its value may only appear in combination.
+
+### 7B. Periodic reshuffle (group-level pruning — strict)
+
+New module `bank_reshuffle.py`. Every `reshuffle_interval` GRPO iterations (default 100), evaluate the entire current bank jointly and prune:
+
+```python
+def reshuffle(bank, X_bank, y, cfg):
+    # X_bank: [N_images, n_formulas]  (cached feature values for all bank formulas)
+
+    # Step 1 — MI ranking (HistGB-matched discriminative power).
+    #   Estimate MI on a subsample (Section 6B) to keep it cheap; MI captures
+    #   non-linear dependence, so it does NOT mis-kill formulas HistGB could use.
+    mi = mutual_info_per_feature(X_bank, y, subsample=cfg.mi_subsample)
+    keep_mi = mi > cfg.mi_floor             # drop genuinely uninformative formulas
+
+    # Step 2 — Lasso / HistGB-importance pruning (the user's "Lasso reshuffle").
+    #   Fit an L1-regularized linear model (or read HistGB feature_importances_)
+    #   on the whole bank; formulas with zero/near-zero importance are dropped.
+    importance = lasso_or_histgb_importance(X_bank[:, keep_mi], y)
+    keep_imp = importance > cfg.imp_floor
+
+    # Step 3 — distribution-redundancy pruning (non-linear dedup).
+    #   Existing corr>0.92 gate catches linear redundancy; add a 1-D Wasserstein
+    #   check ONLY among medium-correlation pairs (0.7–0.92) to catch
+    #   "low linear correlation but near-identical distribution" duplicates.
+    survivors = wasserstein_dedup(X_bank[:, keep_imp],
+                                  corr_band=(0.70, 0.92),
+                                  w_min=cfg.wasserstein_min)
+    return survivors
+```
+
+Notes:
+- **Wasserstein only on the 0.70–0.92 correlation band** — below 0.70 the formulas are clearly different (skip, save compute); above 0.92 the existing linear-correlation gate already removed them.
+- Reshuffle uses **MI**, not linear accuracy, for discriminative pruning — consistent with the HistGB endgame (Section 6B's "match the selector to the classifier").
+- The reshuffle is where strictness lives; admission stays wide.
+
+### 7C. Guardrails against over-pruning (do not let the gates kill diversity)
+
+Implement and log these safety checks; they encode the "wide admission, careful reshuffle" principle:
+
+- **Floor on bank size**: never let reshuffle drop the bank below `min_bank_size` (e.g. 2000). If pruning would go below, keep the top-`min_bank_size` by MI rather than applying hard floors.
+- **Diversity quota**: when pruning redundant formulas, preserve at least one representative per correlation cluster (do not collapse a whole cluster to nothing).
+- **Pareto consistency**: the admission gate must not reject a formula merely for being short/low-variance if it is on the accuracy/length Pareto front (Section 2) — degeneracy rejection (constant/NaN) is fine, but a short, healthy, weak-alone formula must survive admission.
+- **Early-training leniency**: for the first `warmup_iters` iterations, apply admission only (no reshuffle pruning), so the early bank can fill up while the policy is still weak.
+- **Log every rejection reason** (nonfinite / degenerate_constant / saturated / low_mi / low_importance / wasserstein_redundant) and report counts per category in `v3_3_report.md`, so over-aggressive gating is visible.
+
+### 7D. Config
+
+```yaml
+bank_admission:
+  finite_min: 0.95
+  var_min: 1.0e-5            # generous: kills only true constants
+  iqr_min: 1.0e-4
+  keep_min_acc: 0.002        # optional legacy floor; set null to use degeneracy-only gating
+bank_reshuffle:
+  enabled: true
+  reshuffle_interval: 100    # GRPO iterations between reshuffles
+  mi_floor: 0.005            # drop formulas with near-zero MI to labels
+  mi_subsample: 50000
+  imp_floor: 1.0e-4          # Lasso/HistGB importance threshold
+  wasserstein_min: 0.05      # distribution-redundancy threshold (0.70–0.92 corr band)
+  min_bank_size: 2000        # never prune below this
+  warmup_iters: 500          # admission-only before this many iterations
+```
+
+### Acceptance criteria — Section 7
+- [ ] `bank_admission.py` rejects only degenerate formulas (constant / non-finite / saturated); a healthy-but-weak formula is admitted.
+- [ ] `bank_reshuffle.py` runs every `reshuffle_interval` iters; prunes by MI floor → importance floor → Wasserstein dedup (0.70–0.92 band only).
+- [ ] Reshuffle never drops bank below `min_bank_size`; diversity quota keeps ≥1 representative per correlation cluster.
+- [ ] No reshuffle pruning before `warmup_iters`.
+- [ ] All rejection/pruning reasons logged with per-category counts in the final report.
+- [ ] Ablation: bank size and final accuracy with (i) legacy single `min_acc` gate vs (ii) Section 7 wide-admission + reshuffle — report both so the change is justified by data, not assumption.
+- [ ] MI in reshuffle uses subsampled estimate (Section 6B); confirm it is non-linear MI, not linear accuracy.
+
+---
+
 ## Suggested Implementation Order (for Claude Code)
 
-1. **Section 1** (operators) — smallest, unblocks everything, immediately testable.
+1. **Section 1** (operators: semantic + statistical + fuzzy) — smallest, unblocks everything, immediately testable.
 2. **Section 4** (cache + Layer-2 enumeration) on **CIFAR-10** — validates the feature-map idea cheaply; depends only on existing Layer-1 bodies in `l1_selected_bodies.json`.
-3. **Section 6** (HistGB primary + classifier comparison) on **CIFAR-10** — cheap, runs on existing features; validates HistGB+MI+balanced beats linear at our feature scale, and exercises the budget sweep before committing the ImageNet fine-stage choice.
-4. **Section 2** (GRPO + Pareto) — swap-in trainer; validate bloat control on CIFAR-10.
-5. **Section 3** (WordNet hierarchy) — mandatory for ImageNet scale when using HistGB (see 6.0); uses the winning classifier from Section 6 for the fine stage (default: HistGB).
-6. **Section 5** (orchestration + report).
+3. **Section 6** (HistGB primary + classifier comparison) on **CIFAR-10** — cheap, runs on existing features; validates HistGB+MI+balanced beats linear at our feature scale (and the 1A.2-statistics × HistGB synergy), exercises the budget sweep before committing the ImageNet fine-stage choice.
+4. **Section 7** (statistical gating + reshuffle) — wire into the search loop; cheap to validate on CIFAR-10 with the ablation (legacy gate vs wide-admission+reshuffle).
+5. **Section 2** (GRPO + Pareto) — swap-in trainer; validate bloat control on CIFAR-10.
+6. **Section 3** (WordNet hierarchy) — mandatory for ImageNet scale when using HistGB (see 6.0); uses the winning classifier from Section 6 for the fine stage (default: HistGB).
+7. **Section 5** (orchestration + report).
 
 Keep every change behind a config flag so the original PPO / flat / Layer-1-only pipeline remains runnable for comparison. Commit each section separately with its unit tests.

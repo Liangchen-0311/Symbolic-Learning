@@ -210,11 +210,20 @@ def main():
     if search_algorithm == 'grpo':
         from src.rl.grpo_trainer import GRPOTrainer
         grpo_cfg = config.get('grpo', {})
+        # Section 2E: classifier-dependent parsimony strength λ_len. Use an explicit
+        # grpo.lambda_len if given; otherwise derive from classifier.type — linear → strict
+        # (1e-3, anti-bloat is free since a linear model just sums features), histgb →
+        # relaxed (2e-4, long formulas may carry non-linear structure HistGB exploits).
+        clf_type = str(config.get('classifier', {}).get('type', 'linear')).lower()
+        default_lambda = 1.0e-3 if clf_type in ('linear', 'ebm') else 2.0e-4
+        lambda_len = grpo_cfg.get('lambda_len', default_lambda)
         print("\nCreating GRPO trainer (critic-free, Pareto group-relative advantage)...")
+        print(f"  Section 2E λ_len = {lambda_len} (classifier.type={clf_type})")
         trainer = GRPOTrainer(
             group_size=grpo_cfg.get('group_size', 16),
             acc_tol=grpo_cfg.get('acc_tol', 0.003),
             crowding_weight=grpo_cfg.get('crowding_weight', 0.1),
+            lambda_len=lambda_len,
             **common_kwargs,
         )
     else:
